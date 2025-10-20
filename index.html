@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PATH</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="script.js" defer></script>
+</head>
+<body>
+  <h2>PATH (Post-fire Assessment of Treatments for Hillslopes)</h2>
+  <form id ="model-form">
+    <label for="model">Select Model:</label><br />
+    <!-- <label><input type="radio" name="model" value="Net Benefits" checked /> Net Benefits</label><span class="info-bubble" title="This model aims to maximize the overall benefits of post-wildfire treatments, specifically improvements in water quality and reductions in soil erosion, within a specified budget. It is best suited for users who want to achieve the greatest environmental benefits for their available resources.">?</span><br /> -->
+    <label><input type="radio" name="model" value="Cost Effectivness" /> Cost Effectiveness</label><span class="info-bubble" title="This model focuses on minimizing the cost required to meet a specific threshold (either sediment discharge or sediment yield). Users set a target threshold, and the model identifies the least expensive way to achieve that goal. Ideal for situations where meeting a specified objective is the priority.">?</span><br /><br /> 
+
+    <button type="button" onclick="generateModelInputs()">Configure Model Inputs</button>
+  </form>
+
+  <div id="model-details" style="margin-top: 30px;"></div>
+
+</body>
+</html>

@@ -1,0 +1,39 @@
+body {
+    font-family: Arial, sans-serif;
+    padding: 20px;
+  }
+  .treatment-box {
+    margin-bottom: 20px;
+    margin-right: 400px;
+    padding: 10px;
+    border: 1px solid #ccc;
+    background-color: #f9f9f9; 
+  }
+  .info-bubble {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  background: linear-gradient(145deg, #e0e0e0 60%, #bdbdbd 100%);
+  color: #222;
+  border-radius: 50%;
+  text-align: center;
+  font-size: 12px;
+  line-height: 17px;
+  font-weight: bold;
+  cursor: pointer;
+  margin-left: 5px;
+  vertical-align: text-top;
+  border: 1px solid #989898;
+}
+  .info-bubble span {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    color: black;
+    font-size: 14px;
+    line-height: 18px;
+    font-weight: bold;
+    pointer-events: none;
+  }
