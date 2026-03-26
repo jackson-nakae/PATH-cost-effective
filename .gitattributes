@@ -1,0 +1,15 @@
+# Normalize line endings in the repository (LF), regardless of OS checkout.
+* text=auto eol=lf
+
+# Keep common source/data/report assets as LF in git history.
+*.py text eol=lf
+*.qmd text eol=lf
+*.md text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.csv text eol=lf
+*.geojson text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
