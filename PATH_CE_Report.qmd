@@ -1,0 +1,1109 @@
+---
+title: "PATH Report"
+subtitle: "Auto‑generated summary of PATH outputs with interactive maps"
+format:
+  html:
+    toc: true
+    toc-location: left
+    number-sections: false
+    code-fold: show
+    theme: cosmo
+    embed-resources: true
+    grid:
+      sidebar-width: 220px
+      body-width: 950px
+      margin-width: 50px
+jupyter: python3
+# Quarto parameters you can edit at render time, e.g.:
+# quarto render PATH_CE_Report.qmd -P sdyd_threshold:400 -P sddc_threshold:200
+params:
+  # Optional machine-to-machine input payload (preferred for WEPPcloud integration)
+  # The report accepts either a JSON file path here, an inline JSON string
+  # via `weppcloud_payload_inline`, or env var PATH_REPORT_INPUT_JSON.
+  weppcloud_payload_json: null
+  weppcloud_payload_inline: null
+  # Per‑hillslope sediment yield threshold (t)
+  sdyd_threshold: 15
+  # Watershed Sddc/NTU threshold (see PATH_CE.py: ce_select_sites_2)
+  sddc_threshold: 200
+  # Treatments, costs ($/acre), quantity multipliers, and fixed costs (in same order)
+  treatments: ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"]
+  treatment_cost: [1000, 1000, 1000]
+  treatment_quantity: [0.5, 1, 2]
+  fixed_cost: [500, 1000, 1500]
+  # Paths to input data (adjust if needed)
+  hillslope_data_csv: "scenarios.hillslope_summaries.csv"
+  outlet_contrasts_csv: "contrasts.out.csv"
+  hillslope_chars_csv: "hillslopes.csv"
+  # Spatial data (GeoJSON or GDB). If a file geodatabase is provided, the layer name is needed.
+  subcatchments_geojson: "subcatchments.WGS.geojson"
+  channels_geojson: "channels.WGS.geojson"
+  # Optional precomputed threshold sweep outputs for Section 3
+  results_analysis_csv: "gatecreek_threshold_analysis_results.csv"
+  interactive_threshold_csv: "static/gatecreek_threshold_analysis_results_50.csv"
+  interactive_hillslopes_geojson: "static/subcatchments.WGS.geojson"
+  interactive_channels_geojson: "static/channels.WGS.geojson"
+  # Optional FileGDB support (uncomment and set to use instead of GeoJSON)
+  # subcatchments_gdb: "your.gdb"
+  # subcatchments_layer: "Subcatchments"
+---
+
+> PATH is a decision-support tool to help identify where to prioritize hillslope-level treatment given the user selected catchment, treatments, treatment costs, and sediment thresholds. This report provides a summary of PATH's outputs including tables, plots, and maps of the selected hillslopes and treatments. Section 4 provides additional analysis and interactive exploration of the sediment thresholds and their impact on treatment selection and costs.
+
+```{=html}
+<script>
+  // Load both Plotly and deck.gl without RequireJS interference
+  (function() {
+    // Save and disable RequireJS
+    const savedDefine = window.define;
+    delete window.define;
+    
+    let plotlyLoaded = false;
+    let deckLoaded = false;
+    
+    // Load Plotly
+    const plotlyScript = document.createElement('script');
+    plotlyScript.src = 'https://cdn.jsdelivr.net/npm/plotly.js@2.26.0/dist/plotly.min.js';
+    plotlyScript.async = false;
+    plotlyScript.onload = () => {
+      console.log('Plotly loaded');
+      plotlyLoaded = true;
+      checkBothLoaded();
+    };
+    plotlyScript.onerror = () => {
+      console.error('Failed to load Plotly');
+      plotlyLoaded = true;
+      checkBothLoaded();
+    };
+    
+    // Load deck.gl
+    const deckScript = document.createElement('script');
+    deckScript.src = 'https://unpkg.com/deck.gl@8.9.31/dist.min.js';
+    deckScript.async = false;
+    deckScript.onload = () => {
+      console.log('deck.gl loaded');
+      deckLoaded = true;
+      checkBothLoaded();
+    };
+    deckScript.onerror = () => {
+      console.error('Failed to load deck.gl');
+      deckLoaded = true;
+      checkBothLoaded();
+    };
+    
+    function checkBothLoaded() {
+      if (plotlyLoaded && deckLoaded) {
+        if (savedDefine) {
+          window.define = savedDefine;
+        }
+        console.log('Both libraries loaded, RequireJS restored');
+      }
+    }
+    
+    document.head.appendChild(plotlyScript);
+    document.head.appendChild(deckScript);
+  })();
+</script>
+```
+
+```{python}
+#| echo: false
+# If running locally, install the following (uncomment as needed):
+# %pip install pandas numpy pulp geopandas shapely pyproj folium plotly
+
+import os
+import json
+import pandas as pd
+import numpy as np
+import geopandas as gpd
+from shapely.geometry import shape
+from pathlib import Path
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import ipywidgets as widgets
+from IPython.display import Markdown, display, clear_output
+import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
+import plotly.graph_objs as go
+import ast
+
+# Local modules
+from PATH_CE import path_data_ag, ce_select_sites_2
+from PATH_Plots import find_threshold_ranges, all_thresholds, plot_sddc_vs_cost, plot_sdyd_vs_cost
+```
+
+## 1. Parameters
+The follwing Parameters were used for this PATH run: 
+```{python}
+#| echo: false
+# Ensure params exists even if Quarto didn't inject it (e.g., ad-hoc execution)
+try:
+    params
+except NameError:
+    params = {}
+
+def _parse_json_like(value):
+  if isinstance(value, (list, dict, int, float)):
+    return value
+  if not isinstance(value, str):
+    return value
+  text = value.strip()
+  if text == "":
+    return value
+  try:
+    return json.loads(text)
+  except Exception:
+    pass
+  try:
+    return ast.literal_eval(text)
+  except Exception:
+    return value
+
+def _first_not_none(*values):
+  for value in values:
+    if value is not None:
+      return value
+  return None
+
+def _payload_get(payload, *keys):
+  current = payload
+  for key in keys:
+    if not isinstance(current, dict) or key not in current:
+      return None
+    current = current[key]
+  return current
+
+def _to_float(value, default):
+  if value is None:
+    return float(default)
+  try:
+    return float(value)
+  except Exception:
+    return float(default)
+
+def _to_num_list(value, default):
+  parsed = _parse_json_like(value)
+  if not isinstance(parsed, list):
+    parsed = default
+  return [float(v) for v in parsed]
+
+def _to_str_list(value, default):
+  parsed = _parse_json_like(value)
+  if not isinstance(parsed, list):
+    parsed = default
+  return [str(v) for v in parsed]
+
+def _load_weppcloud_payload(quarto_params):
+  payload_from_file = quarto_params.get("weppcloud_payload_json")
+  payload_inline = quarto_params.get("weppcloud_payload_inline")
+  payload_env = os.getenv("PATH_REPORT_INPUT_JSON")
+  payload = {}
+  payload_enabled = False
+
+  if payload_from_file:
+    payload_enabled = True
+    with open(payload_from_file, "r", encoding="utf-8") as f:
+      payload = json.load(f)
+  elif payload_inline:
+    payload_enabled = True
+    payload = _parse_json_like(payload_inline)
+  elif payload_env:
+    payload_enabled = True
+    payload = _parse_json_like(payload_env)
+
+  if not isinstance(payload, dict):
+    raise ValueError("WEPPcloud payload must be a JSON object.")
+  return payload, payload_enabled
+
+def _resolve_value(local_value, payload_value, default, payload_enabled):
+  if payload_enabled:
+    return _first_not_none(payload_value, local_value, default)
+  return _first_not_none(local_value, payload_value, default)
+
+def _resolve_existing_path(primary_value, fallback_values):
+  candidates = [primary_value] + list(fallback_values)
+  for candidate in candidates:
+    if candidate is None:
+      continue
+    candidate_str = str(candidate)
+    if Path(candidate_str).exists():
+      return candidate_str
+  # Keep original behavior if nothing exists so error points at intended input
+  return str(primary_value)
+
+# Parameters can come from:
+# 1) explicit Quarto params (-P ...),
+# 2) WEPPcloud JSON payload,
+# 3) defaults in YAML.
+payload, payload_enabled = _load_weppcloud_payload(params)
+input_mode = "weppcloud_payload" if payload_enabled else "local_params"
+
+# Thresholds
+sdyd_threshold = _to_float(
+  _resolve_value(
+    params.get("sdyd_threshold"),
+    _first_not_none(
+      _payload_get(payload, "sdyd_threshold"),
+      _payload_get(payload, "thresholds", "sdyd_threshold"),
+      _payload_get(payload, "thresholds", "sdyd"),
+    ),
+    15,
+    payload_enabled,
+  ),
+  15,
+)
+
+sddc_threshold = _to_float(
+  _resolve_value(
+    params.get("sddc_threshold"),
+    _first_not_none(
+      _payload_get(payload, "sddc_threshold"),
+      _payload_get(payload, "thresholds", "sddc_threshold"),
+      _payload_get(payload, "thresholds", "sddc"),
+    ),
+    200,
+    payload_enabled,
+  ),
+  200,
+)
+
+# Treatments: supports either vector style or list-of-objects style payload.
+treatment_objects = _payload_get(payload, "treatments")
+has_object_treatments = isinstance(treatment_objects, list) and len(treatment_objects) > 0 and isinstance(treatment_objects[0], dict)
+
+if has_object_treatments:
+  payload_treatments = [t.get("name") for t in treatment_objects]
+  payload_treatment_cost = [t.get("cost") for t in treatment_objects]
+  payload_treatment_quantity = [t.get("quantity") for t in treatment_objects]
+  payload_fixed_cost = [t.get("fixed_cost") for t in treatment_objects]
+else:
+  payload_treatments = _payload_get(payload, "treatments")
+  payload_treatment_cost = _payload_get(payload, "treatment_cost")
+  payload_treatment_quantity = _payload_get(payload, "treatment_quantity")
+  payload_fixed_cost = _payload_get(payload, "fixed_cost")
+
+treatments = _to_str_list(
+  _resolve_value(params.get("treatments"), payload_treatments, ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"], payload_enabled),
+  ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"],
+)
+treatment_cost = _to_num_list(
+  _resolve_value(params.get("treatment_cost"), payload_treatment_cost, [1000, 1000, 1000], payload_enabled),
+  [1000, 1000, 1000],
+)
+treatment_quantity = _to_num_list(
+  _resolve_value(params.get("treatment_quantity"), payload_treatment_quantity, [0.5, 1, 2], payload_enabled),
+  [0.5, 1, 2],
+)
+fixed_cost = _to_num_list(
+  _resolve_value(params.get("fixed_cost"), payload_fixed_cost, [500, 1000, 1500], payload_enabled),
+  [500, 1000, 1500],
+)
+
+if not (len(treatments) == len(treatment_cost) == len(treatment_quantity) == len(fixed_cost)):
+  raise ValueError(
+    "Treatments, treatment_cost, treatment_quantity, and fixed_cost must be the same length. "
+    f"Received lengths: {len(treatments)}, {len(treatment_cost)}, {len(treatment_quantity)}, {len(fixed_cost)}"
+  )
+
+input_files = _payload_get(payload, "input_files") if isinstance(_payload_get(payload, "input_files"), dict) else {}
+spatial_files = _payload_get(payload, "spatial_files") if isinstance(_payload_get(payload, "spatial_files"), dict) else {}
+
+hillslope_data_csv = _first_not_none(
+  _resolve_value(
+  params.get("hillslope_data_csv"),
+  input_files.get("hillslope_data_csv"),
+  "scenarios.hillslope_summaries.csv",
+  payload_enabled,
+  ),
+)
+outlet_contrasts_csv = _first_not_none(
+  _resolve_value(
+  params.get("outlet_contrasts_csv"),
+  input_files.get("outlet_contrasts_csv"),
+  "contrasts.out.csv",
+  payload_enabled,
+  ),
+)
+hillslope_chars_csv = _first_not_none(
+  _resolve_value(
+  params.get("hillslope_chars_csv"),
+  input_files.get("hillslope_chars_csv"),
+  "hillslopes.csv",
+  payload_enabled,
+  ),
+)
+
+subcatchments_geojson = _first_not_none(
+  _resolve_value(
+  params.get("subcatchments_geojson"),
+  spatial_files.get("subcatchments_geojson"),
+  "subcatchments.WGS.geojson",
+  payload_enabled,
+  ),
+)
+channels_geojson = _first_not_none(
+  _resolve_value(
+  params.get("channels_geojson"),
+  spatial_files.get("channels_geojson"),
+  "channels.WGS.geojson",
+  payload_enabled,
+  ),
+)
+
+results_analysis_csv = _first_not_none(
+  _resolve_value(
+  params.get("results_analysis_csv"),
+  _first_not_none(
+    _payload_get(payload, "results_analysis_csv"),
+    _payload_get(payload, "analysis", "results_analysis_csv"),
+  ),
+  "gatecreek_threshold_analysis_results.csv",
+  payload_enabled,
+  ),
+)
+results_analysis_csv = _resolve_existing_path(
+  results_analysis_csv,
+  [
+    "gatecreek_threshold_analysis_results.csv",
+    "static/gatecreek_threshold_analysis_results_50.csv",
+    "gatecreek_threshold_analysis_results_50.csv",
+  ],
+)
+
+interactive_threshold_csv = _first_not_none(
+  _resolve_value(
+  params.get("interactive_threshold_csv"),
+  _payload_get(payload, "interactive", "threshold_csv"),
+  results_analysis_csv,
+  payload_enabled,
+  ),
+)
+interactive_threshold_csv = _resolve_existing_path(
+  interactive_threshold_csv,
+  [
+    results_analysis_csv,
+    "static/gatecreek_threshold_analysis_results_50.csv",
+    "gatecreek_threshold_analysis_results_50.csv",
+    "gatecreek_threshold_analysis_results.csv",
+  ],
+)
+interactive_hillslopes_geojson = _first_not_none(
+  _resolve_value(
+  params.get("interactive_hillslopes_geojson"),
+  _payload_get(payload, "interactive", "hillslopes_geojson"),
+  "static/subcatchments.WGS.geojson",
+  payload_enabled,
+  ),
+)
+interactive_channels_geojson = _first_not_none(
+  _resolve_value(
+  params.get("interactive_channels_geojson"),
+  _payload_get(payload, "interactive", "channels_geojson"),
+  "static/channels.WGS.geojson",
+  payload_enabled,
+  ),
+)
+
+# Create clickable links for file parameters
+from IPython.display import HTML
+
+# hillslope_data_link = f'<a href="{hillslope_data_csv}" download>{hillslope_data_csv}</a>'
+# outlet_data_link = f'<a href="{outlet_contrasts_csv}" download>{outlet_contrasts_csv}</a>'
+# hillslope_chars_link = f'<a href="{hillslope_chars_csv}" download>{hillslope_chars_csv}</a>'
+subcatchments_link = f'<a href="{subcatchments_geojson}" download>{subcatchments_geojson}</a>'
+channels_link = f'<a href="{channels_geojson}" download>{channels_geojson}</a>'
+final_df = path_data_ag(
+    hillslope_data=hillslope_data_csv,
+    outlet_data=outlet_contrasts_csv,
+    hillslope_char_data=hillslope_chars_csv
+)
+final_df.to_csv("PATH_prepared_hillslope_data.csv", index=False)
+hillslope_data_link= f'<a href="PATH_prepared_hillslope_data.csv" download>{"PATH_prepared_hillslope_data.csv"}</a>'
+
+# compile parameters for display into a df
+parameter_df = pd.DataFrame({
+    " ": [
+        "Hillslope Sediment Yield Threshold (tons/acre)",
+        "Outlet Sediment Discharge Threshold (tons) ",
+        "Treatments",
+        "Treatment cost ($/ton)",
+    "Treatment quantity multiplier",
+    "Fixed cost ($)",
+    "Input mode",
+    "Interactive threshold CSV",
+        #"Treatment Quantity (tons/acre)",
+        #"Fixed Cost ($)",
+        "Hillslope Data file",
+        "Subcatchment Spatial Layer",
+        "Channels Spatial Layer",
+    ],
+    "  ": [
+        sdyd_threshold,
+        sddc_threshold,
+    treatments,
+    treatment_cost,
+    treatment_quantity,
+    fixed_cost,
+    input_mode,
+      interactive_threshold_csv,
+        #treatment_quantity,
+        #fixed_cost,
+        hillslope_data_link,
+        #outlet_data_link,
+        #hillslope_chars_link,
+        subcatchments_link,
+        channels_link,
+    ]
+})
+parameter_df.set_index(" ", inplace=True)
+display(HTML(parameter_df.to_html(escape=False)))
+
+# Config used by Section 3 interactive module (JS)
+interactive_csv_text = Path(interactive_threshold_csv).read_text(encoding="utf-8")
+with open(interactive_hillslopes_geojson, "r", encoding="utf-8") as f:
+  interactive_hillslopes_data = json.load(f)
+
+interactive_channels_data = None
+if Path(interactive_channels_geojson).exists():
+  with open(interactive_channels_geojson, "r", encoding="utf-8") as f:
+    interactive_channels_data = json.load(f)
+
+interactive_config = {
+  "csvUrl": interactive_threshold_csv,
+  "csvText": interactive_csv_text,
+  "hillslopesUrl": interactive_hillslopes_geojson,
+  "hillslopesData": interactive_hillslopes_data,
+  "channelsUrl": interactive_channels_geojson,
+  "channelsData": interactive_channels_data,
+  "papaparseUrl": "static/js/vendor/papaparse-5.4.1.min.js",
+  "mapScriptUrl": "static/js/interactive-hillslope-map.js",
+  "initialSdyd": sdyd_threshold,
+  "initialSddc": sddc_threshold,
+}
+display(HTML(f"<script>window.PATH_REPORT_CONFIG = {json.dumps(interactive_config)};</script>"))
+# print({
+#     "sdyd_threshold": sdyd_threshold,
+#     "sddc_threshold": sddc_threshold,
+#     "treatments": treatments,
+#     "treatment_cost": treatment_cost,
+#     "treatment_quantity": treatment_quantity,
+#     "fixed_cost": fixed_cost,
+#     "hillslope_data_csv": hillslope_data_csv,
+#     "outlet_contrasts_csv": outlet_contrasts_csv,
+#     "hillslope_chars_csv": hillslope_chars_csv,
+#     "subcatchments_geojson": subcatchments_geojson,
+#     "channels_geojson": channels_geojson,
+# })
+```
+
+
+
+## 2. Run Results
+
+```{python}
+#| echo: false
+import io
+from contextlib import redirect_stdout, redirect_stderr
+
+with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+  (
+    status,
+    treatment_cost_vectors,
+    sediment_yield_reduction_thresholds,
+    selected_hillslopes,
+    treatment_hillslopes,
+    total_Sddc_reduction,
+    final_Sddc,
+    hillslopes_sdyd,
+    sdyd_df,
+    untreatable_sdyd,
+    total_cost,
+    total_fixed_cost,
+  ) = ce_select_sites_2(
+    data=final_df,
+    treatments=treatments,
+    treatment_cost=treatment_cost,
+    treatment_quantity=treatment_quantity,
+    fixed_cost=fixed_cost,
+    sdyd_threshold=sdyd_threshold,
+    sddc_threshold=sddc_threshold,
+    slope_range=(None),
+    bs_threshold=(None),
+)
+
+# Convert lists to DataFrames for display
+sel_df = pd.DataFrame({
+    "selected_wepp_id": selected_hillslopes
+})
+
+# col_descriptions= {
+#     "wepp_id": "WEPP Hillslope ID",
+#     "TopazID": "Topaz Hillslope ID",
+#     "Landuse": "The Landuse code assigned to the hillslope",
+#     "Sdyd post-treat 0.5 tons/acre": "Sediment Yield (tons) post-fire, after 0.5 tons/acre treatment, per hillslope",
+#     "Sdyd post-treat 1 tons/acre": "Sediment Yield (tons) post-fire, after 1 tons/acre treatment, per hillslope",
+#     "Sdyd post-treat 2 tons/acre": "Sediment Yield (tons) post-fire, after 2 tons/acre treatment, per hillslope",
+#     "Sdyd post-fire": "Sediment Yield (tons) post-fire, pre-treatment, per hillslope",
+#     "Sdyd undisturbed": "Sediment Yield (tons) pre-fire, per hillslope",
+#     "Sddc post-treat 0.5 tons/acre": "Sediment Discharge (tons) post-fire at the outlet, after 0.5 tons/acre treatment on the following hillslope, leaving all other hillslopes untreated",
+#     "Sddc post-treat 1 tons/acre": "Sediment Discharge (tons) post-fire at the outlet, after 1 tons/acre treatment on the following hillslope, leaving all other hillslopes untreated",
+#     "Sddc post-treat 2 tons/acre": "Sediment Discharge (tons) post-fire at the outlet, after 2 tons/acre treatment on the following hillslope, leaving all other hillslopes untreated",
+#     "Sddc post-fire": "Sediment Discharge (tons) post-fire at the outlet, pre-treatment",
+#     "Sddc undisturbed": "Sediment Discharge (tons) pre-fire at the outlet"}
+
+
+
+# Build treatment assignment table (wepp_id -> treatment)
+assignments = []
+for t, hills in zip(treatments, treatment_hillslopes):
+    for h in hills:
+        assignments.append({"wepp_id": h, "treatment": t})
+assign_df = pd.DataFrame(assignments)
+
+```
+
+### 2.1 Interactive Map of Selected Hillslopes
+The map below displays the selected hillslopes by treatment. Hillslopes outlined in red exceeded the hillslope sediment yield (Sdyd) threshold even after treatment. Hover over hillslopes to see details.
+
+```{python}
+#| echo: false
+import folium
+from folium.features import GeoJson, GeoJsonTooltip
+
+# 5.1 Load spatial layers
+def load_subcatchments():
+    # Prefer GeoJSON; add optional FileGDB path here if needed
+    gdf_sub = gpd.read_file(subcatchments_geojson)
+    # Normalize key field names
+    cand_keys = ["TopazID", "topaz_id", "TOPAZID", "Topaz_Id"]
+    topaz_key = None
+    for k in cand_keys:
+        if k in gdf_sub.columns:
+            topaz_key = k
+            break
+    if topaz_key is None:
+        raise ValueError("TopazID column not found in subcatchments layer.")
+    gdf_sub = gdf_sub.rename(columns={topaz_key: "TopazID"})
+    return gdf_sub
+
+def load_channels():
+    try:
+        return gpd.read_file(channels_geojson)
+    except Exception:
+        return None
+
+gdf_sub = load_subcatchments()
+gdf_channels = load_channels()
+
+# 5.2 Build per‑hillslope attributes for tooltip
+attrs = final_df[["wepp_id","TopazID","area","slope_deg","Burn severity",
+                  "Sdyd post-fire","NTU post-fire"]].copy()
+
+# Add assignment & final Sdyd
+attrs = attrs.merge(assign_df, on="wepp_id", how="left")
+attrs = attrs.merge(sdyd_df, on="wepp_id", how="left")
+
+# 5.3 Merge attributes to geometry on TopazID
+gdf = gdf_sub.merge(attrs, on="TopazID", how="left")
+
+# 5.4 Color rules by treatment
+treat_colors = {
+    "0.5 tons/acre": "#c9ebac",
+    "1 tons/acre":   "#57af51",
+    "2 tons/acre":   "#066106",
+    # untreated default below
+}
+untreated_fill = "#e7e9e5"
+
+# 5.5 Build map centered on layer bounds
+m = folium.Map(prefer_canvas=True)
+
+try:
+    bounds = gdf.to_crs(epsg=4326).total_bounds  # [minx, miny, maxx, maxy]
+    m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
+except Exception:
+    pass
+
+# 5.6 Add channels (if present)
+if gdf_channels is not None and len(gdf_channels) > 0:
+    ch = folium.FeatureGroup(name="Channels", overlay=True, show=True)
+    folium.GeoJson(
+        gdf_channels.to_crs(epsg=4326).__geo_interface__,
+        name="channels",
+        style_function=lambda x: {"color": "#50a5d6", "weight": 1, "opacity": 0.9},
+    ).add_to(ch)
+    ch.add_to(m)
+
+# 5.7 Add hillslopes with hover tooltips
+def style_fn(feature):
+    props = feature["properties"]
+    t = props.get("treatment")
+    color = treat_colors.get(t, untreated_fill)
+    return {
+        "fillColor": color,
+        "color": "black",
+        "weight": 0.8,
+        "fillOpacity": 0.8
+    }
+
+tooltip = GeoJsonTooltip(
+    fields=["wepp_id","TopazID","treatment","Burn severity","slope_deg",
+            "Sdyd post-fire","final_Sdyd","area"],
+    aliases=["WEPP ID","TopazID","Treatment","Burn severity","Slope (deg)",
+             "Sdyd post‑fire (t/ac)","Final Sdyd (t/ac)","Area (ac)"],
+    sticky=True,
+    labels=True,
+    localize=True
+)
+
+folium.GeoJson(
+    gdf.to_crs(epsg=4326).__geo_interface__,
+    name="Hillslopes",
+    style_function=style_fn,
+    tooltip=tooltip,
+    highlight_function=lambda f: {"weight": 2, "color": "black"},
+).add_to(m)
+
+# 5.9 Untreatable overlay (red outline)
+if not untreatable_sdyd.empty:
+    u_ids = set(untreatable_sdyd["wepp_id"].tolist())
+    gdf_u = gdf[gdf["wepp_id"].isin(u_ids)]
+    if len(gdf_u) > 0:
+        folium.GeoJson(
+            gdf_u.to_crs(epsg=4326).__geo_interface__,
+            name="Untreatable (Sdyd > threshold)",
+            style_function=lambda x: {"fillOpacity": 0, "color": "red", "weight": 2},
+        ).add_to(m)
+
+# 5.10 Add custom legend
+legend_html = '''
+<div style="position: fixed; 
+            bottom: 10px; right: 10px; width: 120px; height: auto; 
+            background-color: white; border:1px solid grey; z-index:9999; 
+            font-size:10px; padding: 6px; border-radius: 3px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+<h4 style="margin-top:0; margin-bottom:6px; font-size:10px; font-weight:bold;">Legend</h4>
+<div style="margin-bottom: 4px;">
+    <span style="display: inline-block; width: 12px; height: 12px; 
+                 background-color: #c9ebac; border: 1px solid black; margin-right: 6px;"></span>
+    <span style="font-size:8px;">0.5 tons/acre</span>
+</div>
+<div style="margin-bottom: 4px;">
+    <span style="display: inline-block; width: 12px; height: 12px; 
+                 background-color: #57af51; border: 1px solid black; margin-right: 6px;"></span>
+    <span style="font-size:8px;">1 tons/acre</span>
+</div>
+<div style="margin-bottom: 4px;">
+    <span style="display: inline-block; width: 12px; height: 12px; 
+                 background-color: #066106; border: 1px solid black; margin-right: 6px;"></span>
+    <span style="font-size:8px;">2 tons/acre</span>
+</div>
+<div style="margin-bottom: 4px;">
+    <span style="display: inline-block; width: 12px; height: 12px; 
+                 background-color: #e7e9e5; border: 1px solid black; margin-right: 6px;"></span>
+    <span style="font-size:8px;">Untreated</span>
+</div>
+<div style="margin-bottom: 4px;">
+    <span style="display: inline-block; width: 12px; height: 2px; 
+                 background-color: #50a5d6; margin-right: 6px; vertical-align: middle;"></span>
+    <span style="font-size:8px;">Channels</span>
+</div>
+<div style="margin-bottom: 4px;">
+    <span style="display: inline-block; width: 12px; height: 12px; 
+                 background-color: transparent; border: 2px solid red; margin-right: 6px;"></span>
+    <span style="font-size:8px;">Hillslope Sdyd Threshold not met</span>
+</div>
+</div>
+'''
+
+m.get_root().html.add_child(folium.Element(legend_html))
+#display the layer control
+folium.LayerControl(collapsed=True).add_to(m)
+
+m
+
+```
+
+### 2.2 Key Outputs
+
+```{python}
+#| echo: false
+summary = pd.DataFrame({
+    "metric": [
+        "Total cost ($)",#(variable+fixed)",
+        #"Total fixed cost",
+        "Total outlet sediment discharge reduction (tons)",
+        "Final outlet sediment discharge (tons)"
+    ],
+    "value": [
+        float(total_cost),
+        #float(total_fixed_cost),
+        float(total_Sddc_reduction),
+        float(final_Sddc),
+    ]
+})
+summary
+```
+
+### 2.3 Selected Hillslopes by Treatment
+The following table shows the hillslope assignments by treatment.
+
+```{=html}
+<div style="max-height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 8px;">
+```
+
+```{python}
+#| echo: false
+assign_df.sort_values(["treatment","wepp_id"]).reset_index(drop=True)
+```
+
+```{=html}
+</div>
+```
+
+```{python}
+#| echo: false
+counts = assign_df.groupby("treatment").size().rename("n_sites").reset_index()
+counts["cost_per_acre"] = counts["treatment"].map(dict(zip(treatments, treatment_cost)))
+counts
+
+assign_df.to_csv("PATH_selected_hillslopes.csv", index=False)
+
+
+```
+
+```{=html}
+<div>
+<h4></h4>
+
+<ul>
+
+<li><a href="PATH_selected_hillslopes.csv" download>PATH_selected_hillslopes.csv</a></li>
+
+</ul>
+</div>
+```
+
+### 2.4 Final Hillslope Sediment Yield by Hillslope 
+The following table shows the final hillslope sediment yield (Sdyd) by hillslope after treatment. Hillslopes outlined in red exceeded the hillslope sediment yield threshold even after treatment.
+
+```{=html}
+<div style="max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 8px;">
+```
+
+```{python}
+#| echo: false
+# ensure correct dtypes/labels
+
+def highlight_untreatable(row):
+    if row['wepp_id'] in untreatable_sdyd['wepp_id'].values:
+        return ['border: 2px solid red'] * len(row)
+    else:
+        return [''] * len(row)
+
+sdyd_df_sorted = sdyd_df.sort_values("wepp_id").reset_index(drop=True)
+untreatable_sorted = untreatable_sdyd.sort_values("wepp_id").reset_index(drop=True)
+
+
+display(sdyd_df_sorted.style.apply(highlight_untreatable, axis=1))
+
+sdyd_df_sorted.to_csv("PATH_final_sdyd_by_hillslope.csv", index=False)
+untreatable_sorted.to_csv("PATH_sdyd_threshold_exceeded.csv", index=False)
+
+```
+
+```{=html}
+</div>
+```
+```{=html}
+<div>
+<h4></h4>
+
+<ul>
+
+<li><a href="PATH_final_sdyd_by_hillslope.csv" download>PATH_final_sdyd_by_hillslope.csv</a></li>
+<li><a href="PATH_sdyd_threshold_exceeded.csv" download>PATH_sdyd_threshold_exceeded.csv</a></li>
+</ul>
+</div>
+```
+
+## 3. Sediment Threshold Analysis
+This sections provides additional analysis of the Hillslope Sediment Yield and Outlet Sediment Discharge thresholds and their impact on treatment selection and costs.
+
+```{python}
+#| echo: false
+# Find threshold ranges
+sddc_threshold_range, sdyd_threshold_range = find_threshold_ranges(
+    data=final_df,
+    treatments=treatments,
+    treatment_cost=treatment_cost,
+    treatment_quantity=treatment_quantity,
+    fixed_cost=fixed_cost,
+    step_size=5,
+    tolerance=1e-2,
+)
+
+print(f"Minimum Outlet Sediment Discharge Threshold: {sddc_threshold_range[0]}")
+print(f"Maximum Outlet Sediment Discharge Threshold: {sddc_threshold_range[1]}")
+print(f"Minimum Hillslope Sediment Yield Threshold: {sdyd_threshold_range[0]}")
+print(f"Maximum Hillslope Sediment Yield Threshold: {sdyd_threshold_range[1]}")
+
+# run all combinations to get final_df for plotting
+# results_df = all_thresholds(
+#     data=final_df,
+#     treatments=treatments,
+#     treatment_cost=treatment_cost,
+#     treatment_quantity=treatment_quantity,
+#     fixed_cost=fixed_cost,
+#     sdyd_threshold=sdyd_threshold,
+#     sddc_threshold=sddc_threshold,
+#     sddc_threshold_range=sddc_threshold_range,
+#     sdyd_threshold_range=sdyd_threshold_range
+# )
+results_df = pd.read_csv(results_analysis_csv)
+
+```
+
+### 3.1 Interactive Hillslope Selection Map
+Explore how changing the sediment thresholds impacts the hillslopes selected for treatment and the total cost. The map below allows you to interactively adjust the Hillslope Sediment Yield and Outlet Sediment Discharge thresholds and see how the selected hillslopes and total cost change in real time. Hillslopes outlined in red exceeded the Hillslope Sediment Yield threshold even after treatment.
+
+```{=html}
+<link rel="stylesheet" href="static/css/interactive-hillslope-map.css" />
+
+
+<style>
+    /* Minimal overrides now that legend overlays the map */
+    .hillmap-root { margin-bottom: 16px; }
+    .hillmap-map { overflow: hidden; }
+    .hillmap-controls {
+      flex-wrap: nowrap;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .hillmap-slider-control {
+      min-width: 360px;
+      max-width: none;
+      flex: 1 1 0;
+    }
+    .hillmap-slider-header {
+      gap: 12px;
+    }
+    .hillmap-slider-label {
+      white-space: nowrap;
+      font-size: 12px;
+    }
+    .hillmap-map {
+      min-height: 420px;
+    }
+    @media (max-width: 900px) {
+      .hillmap-controls {
+        flex-wrap: wrap;
+      }
+      .hillmap-slider-label {
+        white-space: normal;
+      }
+    }
+    </style>
+
+<div id="hillmap" style="width: 100%; background-color: #f0f0f0; margin-bottom: 2rem;"></div>
+
+<script>
+  // Temporarily disable RequireJS to avoid conflicts with ES6 modules
+  const savedDefine = window.define;
+  if (savedDefine) {
+    window.define = undefined;
+  }
+
+  (async () => {
+    try {
+      const cfg = window.PATH_REPORT_CONFIG || {};
+      function loadScript(src) {
+        return new Promise((resolve, reject) => {
+          const existing = Array.from(document.scripts).find(s => s.src && s.src.includes(src));
+          if (existing) {
+            resolve(true);
+            return;
+          }
+          const script = document.createElement('script');
+          script.src = src;
+          script.async = false;
+          script.onload = () => resolve(true);
+          script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
+          document.head.appendChild(script);
+        });
+      }
+
+      if (!window.Papa) {
+        await loadScript(cfg.papaparseUrl || 'static/js/vendor/papaparse-5.4.1.min.js');
+      }
+      if (!window.initInteractiveHillslopeMap) {
+        await loadScript(cfg.mapScriptUrl || 'static/js/interactive-hillslope-map.js');
+      }
+
+      if (!window.initInteractiveHillslopeMap) {
+        throw new Error('interactive-hillslope-map.js failed to define window.initInteractiveHillslopeMap');
+      }
+
+      const result = await window.initInteractiveHillslopeMap({
+        containerId: "hillmap",
+        csvUrl: cfg.csvUrl,
+        csvText: cfg.csvText,
+        hillslopesUrl: cfg.hillslopesUrl,
+        hillslopesData: cfg.hillslopesData,
+        channelsUrl: cfg.channelsUrl,
+        channelsData: cfg.channelsData,
+        initialSdyd: cfg.initialSdyd,
+        initialSddc: cfg.initialSddc,
+        height: 420
+      });
+      console.log('Map initialized:', result);
+    } catch (error) {
+      console.error('Failed to initialize hillslope map:', error);
+      document.getElementById('hillmap').innerHTML = '<p style="color: red; padding: 20px;">Error loading map: ' + error.message + '</p>';
+    } finally {
+      if (savedDefine) {
+        window.define = savedDefine;
+      }
+    }
+  })();
+</script>
+```
+
+<!-- ### 3.2 Threshold Ranges
+The following ranges indicate the minimum and maximum thresholds for sddc and sdyd that provide variable results. Beyond these values either result in no treatment or no optimal solution exists.These ranges can help guide selection of appropriate thresholds for treatment planning, and are used in the subsequent visualizations.  -->
+
+
+
+
+### 3.2 Cost vs. Threshold Vizualizations
+The following plots and interactive visualizations show the relationship between total cost and the two sediment thresholds; sediment discharge (Sddc) and sediment yield (Sdyd). Explore how changing the thresholds impacts the hillslopes selected and the total cost of treatment.
+```{python}
+#| echo: false
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(5, 7))
+ylabel='Total Cost ($M)'  
+plot_sdyd_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc_threshold, ax=ax1)
+plot_sddc_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc_threshold, ax=ax2)
+plt.tight_layout()
+```
+```{python}
+#| echo: false
+
+frames_data = []
+for i in range(len(results_df)):
+    sdyd_thr = results_df['sdyd_threshold'][i]
+    sddc_thr = results_df['sddc_threshold'][i]
+    treatment_1_1, treatment_1_2, treatment_1_3 = [], [], []
+    treatment_1_1.append(ast.literal_eval(results_df['treatment_hillslopes'][i])[0])
+    treatment_1_2.append(ast.literal_eval(results_df['treatment_hillslopes'][i])[1])
+    treatment_1_3.append(ast.literal_eval(results_df['treatment_hillslopes'][i])[2])
+    
+    selected_1_1_topaz = final_df['TopazID'][final_df['wepp_id'].isin(treatment_1_1[0])]
+    selected_1_2_topaz = final_df['TopazID'][final_df['wepp_id'].isin(treatment_1_2[0])]
+    selected_1_3_topaz = final_df['TopazID'][final_df['wepp_id'].isin(treatment_1_3[0])]
+    untreatable = final_df['TopazID'][final_df['wepp_id'].isin(untreatable_sdyd.wepp_id)]
+
+    treat_select_1_1 = gdf[gdf['TopazID'].isin(selected_1_1_topaz)]
+    treat_select_1_2 = gdf[gdf['TopazID'].isin(selected_1_2_topaz)]
+    treat_select_1_3 = gdf[gdf['TopazID'].isin(selected_1_3_topaz)]
+    untreatable_select = gdf[gdf['TopazID'].isin(untreatable)]
+    untreated_select = gdf[~gdf['TopazID'].isin(final_df['TopazID'][final_df['wepp_id'].isin(selected_hillslopes)])]
+
+    total_cost = results_df['total_cost'][i]
+    total_fixed_cost = results_df['total_fixed_cost'][i]
+    final_Sddc = results_df['final_Sddc'][i]
+    frames_data.append({
+        'sdyd_thr': sdyd_thr,
+        'sddc_thr': sddc_thr,
+        'treat_select_1_1': treat_select_1_1,
+        'treat_select_1_2': treat_select_1_2,
+        'treat_select_1_3': treat_select_1_3,
+        'untreatable_select': untreatable_select,
+        'untreated_select': untreated_select,
+        'total_cost': total_cost,
+        'total_fixed_cost': total_fixed_cost,
+        'final_Sddc': final_Sddc
+    })
+
+sdyd_unique = sorted(set([frame['sdyd_thr'] for frame in frames_data]))
+sddc_unique = sorted(set([frame['sddc_thr'] for frame in frames_data]))
+
+cost_grid = np.full((len(sdyd_unique), len(sddc_unique)), np.nan)
+for frame in frames_data:
+    i = sdyd_unique.index(frame['sdyd_thr'])
+    j = sddc_unique.index(frame['sddc_thr'])
+    cost_grid[i, j] = frame['total_cost']
+
+sdyd_thr = sdyd_threshold
+sddc_thr = sddc_threshold
+
+i = sdyd_unique.index(sdyd_thr)
+j = sddc_unique.index(sddc_thr)
+
+X, Y = np.meshgrid(sdyd_unique, sddc_unique, indexing='ij')
+Z = cost_grid
+
+surface = go.Surface(
+    x=X, y=Y, z=Z,
+    colorscale='Viridis',
+    showscale=False,
+    colorbar=dict(
+        title='Total Cost ($)',
+        len=0.6,
+        thickness=15,
+        x=1.02
+    ),
+    opacity=0.7,
+    hovertemplate='Sdyd Threshold: %{x}<br>Sddc Threshold: %{y}<br>Total Cost: $%{z:,.0f}<extra></extra>'
+)
+
+# Single red marker at the selected thresholds
+selected_marker = go.Scatter3d(
+    x=[sdyd_thr], y=[sddc_thr], z=[cost_grid[i, j]],
+    hovertemplate='Sdyd Threshold: %{x}<br>Sddc Threshold: %{y}<br>Total Cost: $%{z:,.0f}<extra></extra>',
+    mode='markers+text',
+    marker=dict(size=5, color='grey'),
+    textposition="top center",
+    textfont=dict(color='black', size=12),
+    name="User Selected Thresholds"
+)
+
+layout = go.Layout(
+  title=dict(
+    text='Total Cost vs. Hillslope Sediment Yield (Sdyd)<br>and Outlet Sediment Discharge (Sddc) Thresholds',
+    x=0.5,
+    xanchor='center',
+    y=0.95,
+    font=dict(size=14)
+  ),
+    scene=dict(
+      xaxis=dict(title=dict(text='Sdyd Threshold (tons/acre)', font=dict(size=10)), tickfont=dict(size=9)),
+      yaxis=dict(title=dict(text='Sddc Threshold (tons)', font=dict(size=10)), tickfont=dict(size=9)),
+      zaxis=dict(title=dict(text='Total Cost ($)', font=dict(size=10)), tickfont=dict(size=9)),
+        camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))
+    ),
+  autosize=True,
+  width=840,
+  height=620,
+  margin=dict(l=20, r=20, t=100, b=35),
+    showlegend=True,
+    legend=dict(
+        x=0.02,
+        y=0.98,
+        xanchor='left',
+        yanchor='top'
+    )
+)
+fig = go.Figure(data=[surface, selected_marker], layout=layout)
+
+
+
+display(fig)
+
+```
+
+
+
+
+
+
+
+
