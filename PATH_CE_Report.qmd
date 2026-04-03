@@ -421,16 +421,13 @@ final_df.to_csv("PATH_prepared_hillslope_data.csv", index=False)
 hillslope_data_link= f'<a href="PATH_prepared_hillslope_data.csv" download>{"PATH_prepared_hillslope_data.csv"}</a>'
 
 # compile parameters for display into a df
+treatment_cost_display = [500, 1000, 2000]
 parameter_df = pd.DataFrame({
     " ": [
         "Hillslope Sediment Yield Threshold (tons/acre)",
         "Outlet Sediment Discharge Threshold (tons) ",
         "Treatments",
         "Treatment cost ($/ton)",
-    "Treatment quantity multiplier",
-    "Fixed cost ($)",
-    "Input mode",
-    "Interactive threshold CSV",
         #"Treatment Quantity (tons/acre)",
         #"Fixed Cost ($)",
         "Hillslope Data file",
@@ -441,11 +438,7 @@ parameter_df = pd.DataFrame({
         sdyd_threshold,
         sddc_threshold,
     treatments,
-    treatment_cost,
-    treatment_quantity,
-    fixed_cost,
-    input_mode,
-      interactive_threshold_csv,
+    treatment_cost_display,
         #treatment_quantity,
         #fixed_cost,
         hillslope_data_link,
@@ -1060,7 +1053,7 @@ selected_marker = go.Scatter3d(
     x=[sdyd_thr], y=[sddc_thr], z=[cost_grid[i, j]],
     hovertemplate='Sdyd Threshold: %{x}<br>Sddc Threshold: %{y}<br>Total Cost: $%{z:,.0f}<extra></extra>',
     mode='markers+text',
-    marker=dict(size=5, color='grey'),
+    marker=dict(size=5, color='red'),
     textposition="top center",
     textfont=dict(color='black', size=12),
     name="User Selected Thresholds"

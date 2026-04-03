@@ -184,6 +184,16 @@ function getFeatureWeppId(feature) {
   return Number.isFinite(id) ? id : null;
 }
 
+function getFeatureProp(feature, aliases) {
+  const props = feature?.properties || {};
+  for (const key of aliases) {
+    if (props[key] != null && props[key] !== '') {
+      return props[key];
+    }
+  }
+  return null;
+}
+
 function getGeojsonBounds(geojson) {
   let minLng = Infinity;
   let minLat = Infinity;
@@ -245,6 +255,7 @@ function normalizeRows(rows) {
       sddc,
       selected,
       treatments,
+      hillslopesSdyd,
       untreatable,
       totalCost: Number(row.total_cost),
       finalSddc: Number(row.final_Sddc)
@@ -269,6 +280,14 @@ function formatNumber(value, digits = 0) {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits
   });
+}
+
+function formatMaybeNumber(value, digits = 2) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return value == null || value === '' ? 'N/A' : String(value);
+  }
+  return formatNumber(n, digits);
 }
 
 function parseCsvFallback(csvText) {
@@ -586,12 +605,24 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       tooltip.style.display = 'none';
       return;
     }
+
+    const topazId = getFeatureProp(info.object, ['TopazID', 'topaz_id', 'TOPAZID', 'Topaz_Id']);
+    const burnSeverity = getFeatureProp(info.object, ['Burn severity', 'burn_severity', 'BurnSeverity']);
+    const slopeDeg = getFeatureProp(info.object, ['slope_deg', 'Slope (deg)', 'slope']);
+    const sdydPostFire = getFeatureProp(info.object, ['Sdyd post-fire', 'sdyd_post_fire', 'Sdyd_post_fire']);
+    const areaAc = getFeatureProp(info.object, ['area', 'Area (ac)', 'Area']);
     const category = getCategoryLabel(weppId, currentSelection);
+
+    const finalSdyd = currentSelection?.hillslopeSdydByWepp?.get(weppId);
     tooltip.innerHTML = `
-      <div class="hillmap-tooltip__title">WeppID ${weppId}</div>
-      <div class="hillmap-tooltip__row">${category}</div>
-      <div class="hillmap-tooltip__row">Sdyd: ${currentSelection?.sdyd ?? 'N/A'}</div>
-      <div class="hillmap-tooltip__row">Sddc: ${currentSelection?.sddc ?? 'N/A'}</div>
+      <div class="hillmap-tooltip__title">WEPP ID: ${weppId}</div>
+      <div class="hillmap-tooltip__row">TopazID: ${topazId ?? 'N/A'}</div>
+      <div class="hillmap-tooltip__row">Treatment: ${category}</div>
+      <div class="hillmap-tooltip__row">Burn severity: ${burnSeverity ?? 'N/A'}</div>
+      <div class="hillmap-tooltip__row">Slope (deg): ${formatMaybeNumber(slopeDeg, 2)}</div>
+      <div class="hillmap-tooltip__row">Sdyd post-fire (t/ac): ${formatMaybeNumber(sdydPostFire, 2)}</div>
+      <div class="hillmap-tooltip__row">Final Sdyd (t/ac): ${formatMaybeNumber(finalSdyd, 2)}</div>
+      <div class="hillmap-tooltip__row">Area (ac): ${formatMaybeNumber(areaAc, 2)}</div>
     `;
     tooltip.style.display = 'block';
     tooltip.style.left = `${info.x + 12}px`;
@@ -604,6 +635,9 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       selection.tier2Set = new Set(selection.treatments?.[1] || []);
       selection.tier3Set = new Set(selection.treatments?.[2] || []);
       selection.untreatableSet = new Set(selection.untreatable || []);
+      selection.hillslopeSdydByWepp = new Map(
+        (selection.hillslopesSdyd || []).map(h => [h.weppId, h.finalSdyd])
+      );
     }
 
     const treatmentTier1 = new Set(selection?.treatments?.[0] || []);
