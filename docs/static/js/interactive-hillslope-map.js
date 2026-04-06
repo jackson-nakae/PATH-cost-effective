@@ -607,22 +607,13 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
     }
 
     const topazId = getFeatureProp(info.object, ['TopazID', 'topaz_id', 'TOPAZID', 'Topaz_Id']);
-    const burnSeverity = getFeatureProp(info.object, ['Burn severity', 'burn_severity', 'BurnSeverity']);
-    const slopeDeg = getFeatureProp(info.object, ['slope_deg', 'Slope (deg)', 'slope']);
-    const sdydPostFire = getFeatureProp(info.object, ['Sdyd post-fire', 'sdyd_post_fire', 'Sdyd_post_fire']);
-    const areaAc = getFeatureProp(info.object, ['area', 'Area (ac)', 'Area']);
     const category = getCategoryLabel(weppId, currentSelection);
 
     const finalSdyd = currentSelection?.hillslopeSdydByWepp?.get(weppId);
     tooltip.innerHTML = `
-      <div class="hillmap-tooltip__title">WEPP ID: ${weppId}</div>
       <div class="hillmap-tooltip__row">TopazID: ${topazId ?? 'N/A'}</div>
       <div class="hillmap-tooltip__row">Treatment: ${category}</div>
-      <div class="hillmap-tooltip__row">Burn severity: ${burnSeverity ?? 'N/A'}</div>
-      <div class="hillmap-tooltip__row">Slope (deg): ${formatMaybeNumber(slopeDeg, 2)}</div>
-      <div class="hillmap-tooltip__row">Sdyd post-fire (t/ac): ${formatMaybeNumber(sdydPostFire, 2)}</div>
       <div class="hillmap-tooltip__row">Final Sdyd (t/ac): ${formatMaybeNumber(finalSdyd, 2)}</div>
-      <div class="hillmap-tooltip__row">Area (ac): ${formatMaybeNumber(areaAc, 2)}</div>
     `;
     tooltip.style.display = 'block';
     tooltip.style.left = `${info.x + 12}px`;

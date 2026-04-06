@@ -417,8 +417,13 @@ final_df = path_data_ag(
     outlet_data=outlet_contrasts_csv,
     hillslope_char_data=hillslope_chars_csv
 )
-final_df.to_csv("PATH_prepared_hillslope_data.csv", index=False)
-hillslope_data_link= f'<a href="PATH_prepared_hillslope_data.csv" download>{"PATH_prepared_hillslope_data.csv"}</a>'
+download_dir = Path("static/downloads")
+download_dir.mkdir(parents=True, exist_ok=True)
+
+prepared_hillslope_csv_name = "PATH_prepared_hillslope_data.csv"
+prepared_hillslope_csv_path = download_dir / prepared_hillslope_csv_name
+final_df.to_csv(prepared_hillslope_csv_path, index=False)
+hillslope_data_link = f'<a href="static/downloads/{prepared_hillslope_csv_name}" download>{prepared_hillslope_csv_name}</a>'
 
 # compile parameters for display into a df
 treatment_cost_display = [500, 1000, 2000]
@@ -426,6 +431,8 @@ parameter_df = pd.DataFrame({
     " ": [
         "Hillslope Sediment Yield Threshold (tons/acre)",
         "Outlet Sediment Discharge Threshold (tons) ",
+    "Slope filter",
+    "Burn Severity filter",
         "Treatments",
         "Treatment cost ($/ton)",
         #"Treatment Quantity (tons/acre)",
@@ -437,6 +444,8 @@ parameter_df = pd.DataFrame({
     "  ": [
         sdyd_threshold,
         sddc_threshold,
+      None,
+      None,
     treatments,
     treatment_cost_display,
         #treatment_quantity,
@@ -759,7 +768,9 @@ counts = assign_df.groupby("treatment").size().rename("n_sites").reset_index()
 counts["cost_per_acre"] = counts["treatment"].map(dict(zip(treatments, treatment_cost)))
 counts
 
-assign_df.to_csv("PATH_selected_hillslopes.csv", index=False)
+selected_hillslopes_csv_name = "PATH_selected_hillslopes.csv"
+selected_hillslopes_csv_path = download_dir / selected_hillslopes_csv_name
+assign_df.to_csv(selected_hillslopes_csv_path, index=False)
 
 
 ```
@@ -770,7 +781,7 @@ assign_df.to_csv("PATH_selected_hillslopes.csv", index=False)
 
 <ul>
 
-<li><a href="PATH_selected_hillslopes.csv" download>PATH_selected_hillslopes.csv</a></li>
+<li><a href="static/downloads/PATH_selected_hillslopes.csv" download>PATH_selected_hillslopes.csv</a></li>
 
 </ul>
 </div>
@@ -799,8 +810,10 @@ untreatable_sorted = untreatable_sdyd.sort_values("wepp_id").reset_index(drop=Tr
 
 display(sdyd_df_sorted.style.apply(highlight_untreatable, axis=1))
 
-sdyd_df_sorted.to_csv("PATH_final_sdyd_by_hillslope.csv", index=False)
-untreatable_sorted.to_csv("PATH_sdyd_threshold_exceeded.csv", index=False)
+final_sdyd_csv_name = "PATH_final_sdyd_by_hillslope.csv"
+threshold_exceeded_csv_name = "PATH_sdyd_threshold_exceeded.csv"
+sdyd_df_sorted.to_csv(download_dir / final_sdyd_csv_name, index=False)
+untreatable_sorted.to_csv(download_dir / threshold_exceeded_csv_name, index=False)
 
 ```
 
@@ -813,8 +826,8 @@ untreatable_sorted.to_csv("PATH_sdyd_threshold_exceeded.csv", index=False)
 
 <ul>
 
-<li><a href="PATH_final_sdyd_by_hillslope.csv" download>PATH_final_sdyd_by_hillslope.csv</a></li>
-<li><a href="PATH_sdyd_threshold_exceeded.csv" download>PATH_sdyd_threshold_exceeded.csv</a></li>
+<li><a href="static/downloads/PATH_final_sdyd_by_hillslope.csv" download>PATH_final_sdyd_by_hillslope.csv</a></li>
+<li><a href="static/downloads/PATH_sdyd_threshold_exceeded.csv" download>PATH_sdyd_threshold_exceeded.csv</a></li>
 </ul>
 </div>
 ```
@@ -834,7 +847,6 @@ sddc_threshold_range, sdyd_threshold_range = find_threshold_ranges(
     step_size=5,
     tolerance=1e-2,
 )
-
 print(f"Minimum Outlet Sediment Discharge Threshold: {sddc_threshold_range[0]}")
 print(f"Maximum Outlet Sediment Discharge Threshold: {sddc_threshold_range[1]}")
 print(f"Minimum Hillslope Sediment Yield Threshold: {sdyd_threshold_range[0]}")
