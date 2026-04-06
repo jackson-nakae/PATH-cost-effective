@@ -410,8 +410,8 @@ from IPython.display import HTML
 # hillslope_data_link = f'<a href="{hillslope_data_csv}" download>{hillslope_data_csv}</a>'
 # outlet_data_link = f'<a href="{outlet_contrasts_csv}" download>{outlet_contrasts_csv}</a>'
 # hillslope_chars_link = f'<a href="{hillslope_chars_csv}" download>{hillslope_chars_csv}</a>'
-subcatchments_link = f'<a href="{subcatchments_geojson}" download>{subcatchments_geojson}</a>'
-channels_link = f'<a href="{channels_geojson}" download>{channels_geojson}</a>'
+subcatchments_link = f'<a href="static/{Path(subcatchments_geojson).name}" download>{Path(subcatchments_geojson).name}</a>'
+channels_link = f'<a href="static/{Path(channels_geojson).name}" download>{Path(channels_geojson).name}</a>'
 final_df = path_data_ag(
     hillslope_data=hillslope_data_csv,
     outlet_data=outlet_contrasts_csv,
