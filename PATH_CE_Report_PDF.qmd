@@ -1,0 +1,641 @@
+---
+title: "PATH Report"
+subtitle: "Auto‑generated summary of PATH outputs"
+abstract: |
+  PATH is a decision-support tool to help identify where to prioritize hillslope-level treatment given the user selected catchment, treatments, treatment costs, and sediment thresholds. This report provides a summary of PATH's outputs including tables, plots, and maps of the selected hillslopes and treatments. Section 3 provides additional analysis of the sediment thresholds and their impact on treatment selection and costs.
+format:
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    geometry: "margin=1in, top=0.75in, bottom=0.75in"
+    keep-tex: false
+    fig-pos: "H"
+    colorlinks: true
+jupyter: python3
+params:
+  weppcloud_payload_json: null
+  weppcloud_payload_inline: null
+  sdyd_threshold: 15
+  sddc_threshold: 200
+  treatments: ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"]
+  treatment_cost: [2475, 2475, 2475]
+  treatment_quantity: [0.5, 1, 2]
+  fixed_cost: [500, 1000, 1500]
+  hillslope_data_csv: "scenarios.hillslope_summaries.csv"
+  outlet_contrasts_csv: "contrasts.out.csv"
+  hillslope_chars_csv: "hillslopes.csv"
+  subcatchments_geojson: "subcatchments.WGS.geojson"
+  channels_geojson: "channels.WGS.geojson"
+  results_analysis_csv: "gatecreek_threshold_analysis_results.csv"
+---
+
+```{python}
+#| echo: false
+import os
+import json
+import pandas as pd
+import numpy as np
+import geopandas as gpd
+from pathlib import Path
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.colors as mcolors
+from matplotlib.patches import Patch
+import ast
+import io
+from contextlib import redirect_stdout, redirect_stderr
+
+from PATH_CE import path_data_ag, ce_select_sites_2
+from PATH_Plots import find_threshold_ranges, all_thresholds, plot_sddc_vs_cost, plot_sdyd_vs_cost
+```
+
+## Parameters
+
+The following parameters were used for this PATH run:
+
+```{python}
+#| echo: false
+try:
+    params
+except NameError:
+    params = {}
+
+def _parse_json_like(value):
+    if isinstance(value, (list, dict, int, float)):
+        return value
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text == "":
+        return value
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(text)
+    except Exception:
+        return value
+
+def _first_not_none(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+def _payload_get(payload, *keys):
+    current = payload
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current
+
+def _to_float(value, default):
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+def _to_num_list(value, default):
+    parsed = _parse_json_like(value)
+    if not isinstance(parsed, list):
+        parsed = default
+    return [float(v) for v in parsed]
+
+def _to_str_list(value, default):
+    parsed = _parse_json_like(value)
+    if not isinstance(parsed, list):
+        parsed = default
+    return [str(v) for v in parsed]
+
+def _load_weppcloud_payload(quarto_params):
+    payload_from_file = quarto_params.get("weppcloud_payload_json")
+    payload_inline = quarto_params.get("weppcloud_payload_inline")
+    payload_env = os.getenv("PATH_REPORT_INPUT_JSON")
+    payload = {}
+    payload_enabled = False
+    if payload_from_file:
+        payload_enabled = True
+        with open(payload_from_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    elif payload_inline:
+        payload_enabled = True
+        payload = _parse_json_like(payload_inline)
+    elif payload_env:
+        payload_enabled = True
+        payload = _parse_json_like(payload_env)
+    if not isinstance(payload, dict):
+        raise ValueError("WEPPcloud payload must be a JSON object.")
+    return payload, payload_enabled
+
+def _resolve_value(local_value, payload_value, default, payload_enabled):
+    if payload_enabled:
+        return _first_not_none(payload_value, local_value, default)
+    return _first_not_none(local_value, payload_value, default)
+
+def _resolve_existing_path(primary_value, fallback_values):
+    candidates = [primary_value] + list(fallback_values)
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        candidate_str = str(candidate)
+        if Path(candidate_str).exists():
+            return candidate_str
+    return str(primary_value)
+
+payload, payload_enabled = _load_weppcloud_payload(params)
+
+sdyd_threshold = _to_float(
+    _resolve_value(
+        params.get("sdyd_threshold"),
+        _first_not_none(
+            _payload_get(payload, "sdyd_threshold"),
+            _payload_get(payload, "thresholds", "sdyd_threshold"),
+            _payload_get(payload, "thresholds", "sdyd"),
+        ),
+        15,
+        payload_enabled,
+    ),
+    15,
+)
+
+sddc_threshold = _to_float(
+    _resolve_value(
+        params.get("sddc_threshold"),
+        _first_not_none(
+            _payload_get(payload, "sddc_threshold"),
+            _payload_get(payload, "thresholds", "sddc_threshold"),
+            _payload_get(payload, "thresholds", "sddc"),
+        ),
+        200,
+        payload_enabled,
+    ),
+    200,
+)
+
+treatment_objects = _payload_get(payload, "treatments")
+has_object_treatments = (
+    isinstance(treatment_objects, list)
+    and len(treatment_objects) > 0
+    and isinstance(treatment_objects[0], dict)
+)
+if has_object_treatments:
+    payload_treatments = [t.get("name") for t in treatment_objects]
+    payload_treatment_cost = [t.get("cost") for t in treatment_objects]
+    payload_treatment_quantity = [t.get("quantity") for t in treatment_objects]
+    payload_fixed_cost = [t.get("fixed_cost") for t in treatment_objects]
+else:
+    payload_treatments = _payload_get(payload, "treatments")
+    payload_treatment_cost = _payload_get(payload, "treatment_cost")
+    payload_treatment_quantity = _payload_get(payload, "treatment_quantity")
+    payload_fixed_cost = _payload_get(payload, "fixed_cost")
+
+treatments = _to_str_list(
+    _resolve_value(params.get("treatments"), payload_treatments,
+                   ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"], payload_enabled),
+    ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"],
+)
+treatment_cost = _to_num_list(
+    _resolve_value(params.get("treatment_cost"), payload_treatment_cost,
+                   [2475, 2475, 2475], payload_enabled),
+    [2475, 2475, 2475],
+)
+treatment_quantity = _to_num_list(
+    _resolve_value(params.get("treatment_quantity"), payload_treatment_quantity,
+                   [0.5, 1, 2], payload_enabled),
+    [0.5, 1, 2],
+)
+fixed_cost = _to_num_list(
+    _resolve_value(params.get("fixed_cost"), payload_fixed_cost,
+                   [500, 1000, 1500], payload_enabled),
+    [500, 1000, 1500],
+)
+
+input_files = _payload_get(payload, "input_files") if isinstance(_payload_get(payload, "input_files"), dict) else {}
+spatial_files = _payload_get(payload, "spatial_files") if isinstance(_payload_get(payload, "spatial_files"), dict) else {}
+
+hillslope_data_csv = _first_not_none(
+    _resolve_value(params.get("hillslope_data_csv"), input_files.get("hillslope_data_csv"),
+                   "scenarios.hillslope_summaries.csv", payload_enabled))
+outlet_contrasts_csv = _first_not_none(
+    _resolve_value(params.get("outlet_contrasts_csv"), input_files.get("outlet_contrasts_csv"),
+                   "contrasts.out.csv", payload_enabled))
+hillslope_chars_csv = _first_not_none(
+    _resolve_value(params.get("hillslope_chars_csv"), input_files.get("hillslope_chars_csv"),
+                   "hillslopes.csv", payload_enabled))
+
+subcatchments_geojson = _first_not_none(
+    _resolve_value(params.get("subcatchments_geojson"), spatial_files.get("subcatchments_geojson"),
+                   "subcatchments.WGS.geojson", payload_enabled))
+channels_geojson = _first_not_none(
+    _resolve_value(params.get("channels_geojson"), spatial_files.get("channels_geojson"),
+                   "channels.WGS.geojson", payload_enabled))
+
+results_analysis_csv = _first_not_none(
+    _resolve_value(params.get("results_analysis_csv"),
+                   _first_not_none(
+                       _payload_get(payload, "results_analysis_csv"),
+                       _payload_get(payload, "analysis", "results_analysis_csv"),
+                   ),
+                   "gatecreek_threshold_analysis_results.csv",
+                   payload_enabled))
+results_analysis_csv = _resolve_existing_path(
+    results_analysis_csv,
+    ["gatecreek_threshold_analysis_results.csv",
+     "static/gatecreek_threshold_analysis_results_50.csv",
+     "gatecreek_threshold_analysis_results_50.csv"])
+
+final_df = path_data_ag(
+    hillslope_data=hillslope_data_csv,
+    outlet_data=outlet_contrasts_csv,
+    hillslope_char_data=hillslope_chars_csv
+)
+
+parameter_df = pd.DataFrame({
+    "Parameter": [
+        "Hillslope Sediment Yield Threshold (tons/acre)",
+        "Outlet Sediment Discharge Threshold (tons)",
+        "Treatments",
+        "Treatment Cost ($/acre)",
+    ],
+    "Value": [
+        str(sdyd_threshold),
+        str(sddc_threshold),
+        str(treatments),
+        str(treatment_cost),
+    ]
+})
+parameter_df.set_index("Parameter", inplace=True)
+parameter_df
+```
+
+## Run Results
+
+```{python}
+#| echo: false
+with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+    (
+        status,
+        treatment_cost_vectors,
+        sediment_yield_reduction_thresholds,
+        selected_hillslopes,
+        treatment_hillslopes,
+        total_Sddc_reduction,
+        final_Sddc,
+        hillslopes_sdyd,
+        sdyd_df,
+        untreatable_sdyd,
+        total_cost,
+        total_fixed_cost,
+    ) = ce_select_sites_2(
+        data=final_df,
+        treatments=treatments,
+        treatment_cost=treatment_cost,
+        treatment_quantity=treatment_quantity,
+        fixed_cost=fixed_cost,
+        sdyd_threshold=sdyd_threshold,
+        sddc_threshold=sddc_threshold,
+        slope_range=(None),
+        bs_threshold=(None),
+    )
+
+assignments = []
+for t, hills in zip(treatments, treatment_hillslopes):
+    for h in hills:
+        assignments.append({"wepp_id": h, "treatment": t})
+assign_df = pd.DataFrame(assignments)
+```
+
+### Static Map of Selected Hillslopes
+
+The map below shows the selected hillslopes by treatment. Hillslopes outlined in red exceeded the hillslope sediment yield (Sdyd) threshold even after treatment.
+
+```{python}
+#| echo: false
+#| fig-width: 6
+#| fig-height: 5
+#| fig-cap: "Selected hillslopes by treatment assignment. Red outlines indicate hillslopes where the sediment yield threshold could not be met."
+
+def load_subcatchments_gdf(geojson_path):
+    gdf = gpd.read_file(geojson_path)
+    cand_keys = ["TopazID", "topaz_id", "TOPAZID", "Topaz_Id"]
+    topaz_key = next((k for k in cand_keys if k in gdf.columns), None)
+    if topaz_key is None:
+        raise ValueError("TopazID column not found in subcatchments layer.")
+    return gdf.rename(columns={topaz_key: "TopazID"})
+
+def load_channels_gdf(geojson_path):
+    try:
+        return gpd.read_file(geojson_path)
+    except Exception:
+        return None
+
+gdf_sub = load_subcatchments_gdf(subcatchments_geojson)
+gdf_channels = load_channels_gdf(channels_geojson)
+
+treat_colors = {
+    "0.5 tons/acre": "#c9ebac",
+    "1 tons/acre":   "#57af51",
+    "2 tons/acre":   "#066106",
+}
+untreated_fill = "#e7e9e5"
+
+attrs = final_df[["wepp_id", "TopazID"]].copy()
+attrs = attrs.merge(assign_df, on="wepp_id", how="left")
+gdf_map = gdf_sub.merge(attrs, on="TopazID", how="left").to_crs(epsg=4326)
+
+def _make_hillslope_map(gdf_map, gdf_channels, assign_df, untreatable_sdyd,
+                        treat_colors, untreated_fill, title="Selected Hillslopes",
+                        ax=None, figsize=(6, 5)):
+    """Render a static hillslope treatment map on a matplotlib axis."""
+    standalone = ax is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=figsize)
+
+    def _color(row):
+        t = row.get("treatment")
+        return treat_colors.get(t, untreated_fill)
+
+    colors = gdf_map.apply(_color, axis=1)
+    gdf_map.plot(ax=ax, color=colors, edgecolor="black", linewidth=0.4)
+
+    if gdf_channels is not None and len(gdf_channels) > 0:
+        gdf_channels.to_crs(epsg=4326).plot(ax=ax, color="#50a5d6", linewidth=0.8, zorder=3)
+
+    if untreatable_sdyd is not None and not untreatable_sdyd.empty:
+        u_ids = set(untreatable_sdyd["wepp_id"].tolist())
+        u_topaz = final_df.loc[final_df["wepp_id"].isin(u_ids), "TopazID"]
+        gdf_u = gdf_map[gdf_map["TopazID"].isin(u_topaz)]
+        if len(gdf_u) > 0:
+            gdf_u.plot(ax=ax, facecolor="none", edgecolor="red", linewidth=1.5, zorder=4)
+
+    legend_elems = [
+        Patch(facecolor=treat_colors.get("0.5 tons/acre", untreated_fill),
+              edgecolor="black", linewidth=0.4, label="0.5 tons/acre"),
+        Patch(facecolor=treat_colors.get("1 tons/acre", untreated_fill),
+              edgecolor="black", linewidth=0.4, label="1 ton/acre"),
+        Patch(facecolor=treat_colors.get("2 tons/acre", untreated_fill),
+              edgecolor="black", linewidth=0.4, label="2 tons/acre"),
+        Patch(facecolor=untreated_fill, edgecolor="black", linewidth=0.4, label="Untreated"),
+        Line2D([0], [0], color="#50a5d6", linewidth=1.2, label="Channels"),
+        Patch(facecolor="none", edgecolor="red", linewidth=1.5, label="Sdyd threshold not met"),
+    ]
+    ax.legend(handles=legend_elems, loc="lower right", fontsize=6, framealpha=0.85,
+              borderpad=0.5)
+    ax.set_title(title, fontsize=9)
+    ax.set_xlabel("Longitude", fontsize=7)
+    ax.set_ylabel("Latitude", fontsize=7)
+    ax.tick_params(labelsize=6)
+
+    if standalone:
+        plt.tight_layout()
+        plt.show()
+        return ax
+
+_make_hillslope_map(
+    gdf_map=gdf_map,
+    gdf_channels=gdf_channels,
+    assign_df=assign_df,
+    untreatable_sdyd=untreatable_sdyd,
+    treat_colors=treat_colors,
+    untreated_fill=untreated_fill,
+    title=f"Selected Hillslopes\n(Sdyd threshold = {sdyd_threshold} t/ac, Sddc threshold = {sddc_threshold} t)",
+)
+```
+
+### Key Outputs
+
+```{python}
+#| echo: false
+summary = pd.DataFrame({
+    "Metric": [
+        "Total cost ($)",
+        "Total outlet sediment discharge reduction (tons)",
+        "Final outlet sediment discharge (tons)"
+    ],
+    "Value": [
+        f"${float(total_cost):,.2f}",
+        f"{float(total_Sddc_reduction):,.3f}",
+        f"{float(final_Sddc):,.3f}",
+    ]
+})
+summary.set_index("Metric", inplace=True)
+summary
+```
+
+### Combined Hillslope Treatment and Final Sdyd
+
+The table below combines treatment assignment and final hillslope sediment yield (Sdyd). Any hillslope present in the final Sdyd output but missing from treatment assignments is labeled as `No treatment`. Hillslopes with exceeded Sdyd threshold are flagged.
+
+```{python}
+#| echo: false
+# Set pandas display options to show full table
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+
+assign_clean = assign_df.copy()
+if not assign_clean.empty:
+    assign_clean["wepp_id"] = pd.to_numeric(assign_clean["wepp_id"], errors="coerce").astype("Int64")
+
+sdyd_clean = sdyd_df.copy()
+sdyd_clean["wepp_id"] = pd.to_numeric(sdyd_clean["wepp_id"], errors="coerce").astype("Int64")
+
+combined_df = sdyd_clean.merge(assign_clean[["wepp_id", "treatment"]], on="wepp_id", how="left")
+combined_df["treatment"] = combined_df["treatment"].fillna("No treatment")
+
+u_ids = set(pd.to_numeric(untreatable_sdyd["wepp_id"], errors="coerce").dropna().astype(int).tolist()) if not untreatable_sdyd.empty else set()
+combined_df["sdyd_threshold_exceeded"] = combined_df["wepp_id"].astype("Int64").isin(u_ids)
+
+# Ensure integer display for wepp_id (no float formatting)
+combined_df["wepp_id"] = combined_df["wepp_id"].astype("Int64")
+combined_df = combined_df.sort_values("wepp_id").reset_index(drop=True)
+combined_df
+```
+
+```{python}
+#| echo: false
+counts = combined_df.groupby("treatment").size().rename("n_sites").reset_index()
+cost_map = dict(zip(treatments, treatment_cost))
+counts["cost_per_acre ($)"] = counts["treatment"].map(cost_map)
+counts
+```
+
+## Sediment Threshold Analysis
+
+This section provides additional analysis of the Hillslope Sediment Yield and Outlet Sediment Discharge thresholds and their impact on treatment selection and costs.
+
+```{python}
+#| echo: false
+results_df = pd.read_csv(results_analysis_csv)
+```
+
+### Hillslope Selection Maps at Threshold Percentiles
+
+The following maps show the hillslopes selected for treatment when the combined sediment thresholds (Sdyd and Sddc) are set at the 25th, 50th, and 75th percentiles of total treatment cost across all evaluated threshold combinations.
+
+```{python}
+#| echo: false
+#| fig-width: 7
+#| fig-height: 8
+#| fig-cap: "Selected hillslopes at the 25th, 50th, and 75th cost percentiles of the threshold sweep."
+
+# Find the Q25, Q50, Q75 total_cost percentiles and closest matching rows
+costs = results_df["total_cost"].values
+q25_cost = np.percentile(costs, 25)
+q50_cost = np.percentile(costs, 50)
+q75_cost = np.percentile(costs, 75)
+
+def _find_closest_row(df, target_cost):
+    idx = (df["total_cost"] - target_cost).abs().idxmin()
+    return df.loc[idx]
+
+row_q25 = _find_closest_row(results_df, q25_cost)
+row_q50 = _find_closest_row(results_df, q50_cost)
+row_q75 = _find_closest_row(results_df, q75_cost)
+
+percentile_rows = [
+    ("25th Percentile", row_q25),
+    ("50th Percentile", row_q50),
+    ("75th Percentile", row_q75),
+]
+
+def _build_gdf_for_row(row, gdf_sub, final_df, treatments):
+    """Build a merged GeoDataFrame with treatment assignment for a given results_df row."""
+    th_hillslopes = ast.literal_eval(row["treatment_hillslopes"]) if isinstance(row["treatment_hillslopes"], str) else row["treatment_hillslopes"]
+    th_assignments = []
+    for t, hills in zip(treatments, th_hillslopes):
+        for h in hills:
+            th_assignments.append({"wepp_id": h, "treatment": t})
+    th_assign = pd.DataFrame(th_assignments) if th_assignments else pd.DataFrame(columns=["wepp_id", "treatment"])
+
+    untreatable_raw = row.get("untreatable_sdyd", None)
+    if pd.isna(untreatable_raw) if not isinstance(untreatable_raw, str) else False:
+        untreatable_df = pd.DataFrame(columns=["wepp_id", "final_Sdyd"])
+    elif isinstance(untreatable_raw, str):
+        import re
+        pattern = r'^\s*(\d+)\s+[\d\.]+.*$'
+        wepp_ids = [int(m.group(1)) for line in untreatable_raw.split('\n')
+                    if (m := re.match(pattern, line))]
+        untreatable_df = pd.DataFrame({"wepp_id": wepp_ids})
+    else:
+        untreatable_df = pd.DataFrame(columns=["wepp_id", "final_Sdyd"])
+
+    attrs = final_df[["wepp_id", "TopazID"]].copy()
+    attrs = attrs.merge(th_assign, on="wepp_id", how="left")
+    gdf = gdf_sub.to_crs(epsg=4326).merge(attrs, on="TopazID", how="left")
+    return gdf, untreatable_df
+
+fig, axes = plt.subplots(3, 1, figsize=(7, 12))
+for ax, (label, row) in zip(axes, percentile_rows):
+    gdf_p, untreat_p = _build_gdf_for_row(row, gdf_sub, final_df, treatments)
+    title = (f"{label}  |  Sdyd={row['sdyd_threshold']:.0f} t/ac, "
+             f"Sddc={row['sddc_threshold']:.0f} t  |  Cost: ${float(row['total_cost']):,.0f}")
+    _make_hillslope_map(
+        gdf_map=gdf_p,
+        gdf_channels=gdf_channels,
+        assign_df=pd.DataFrame(),
+        untreatable_sdyd=untreat_p,
+        treat_colors=treat_colors,
+        untreated_fill=untreated_fill,
+        title=title,
+        ax=ax,
+    )
+
+plt.tight_layout(pad=1.5)
+plt.show()
+```
+
+### Cost vs. Threshold Visualizations
+
+The following plots show the relationship between total cost and the two sediment thresholds.
+
+```{python}
+#| echo: false
+#| fig-width: 5.5
+#| fig-height: 7
+#| fig-cap: "Total treatment cost as a function of each sediment threshold."
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(5.5, 7))
+plot_sdyd_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc_threshold, ax=ax1)
+plot_sddc_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc_threshold, ax=ax2)
+plt.tight_layout()
+plt.show()
+```
+
+### Total Cost Surface
+
+The surface below shows total treatment cost across all evaluated combinations of the two sediment thresholds. The red marker (+) indicates the user-selected thresholds. The blue (25th), green (50th), and orange (75th) markers indicate the three cost percentile scenarios shown in the maps above.
+
+```{python}
+#| echo: false
+#| fig-width: 7
+#| fig-height: 6
+#| fig-cap: "3D cost surface with user-selected and percentile threshold markers."
+
+frames_data = []
+for i in range(len(results_df)):
+    frames_data.append({
+        'sdyd_thr': results_df['sdyd_threshold'][i],
+        'sddc_thr': results_df['sddc_threshold'][i],
+        'total_cost': results_df['total_cost'][i],
+    })
+
+sdyd_unique = sorted(set(f['sdyd_thr'] for f in frames_data))
+sddc_unique = sorted(set(f['sddc_thr'] for f in frames_data))
+cost_grid = np.full((len(sdyd_unique), len(sddc_unique)), np.nan)
+for frame in frames_data:
+    ii = sdyd_unique.index(frame['sdyd_thr'])
+    jj = sddc_unique.index(frame['sddc_thr'])
+    cost_grid[ii, jj] = frame['total_cost']
+
+X, Y = np.meshgrid(sdyd_unique, sddc_unique, indexing='ij')
+
+fig = plt.figure(figsize=(7, 6))
+ax3d = fig.add_subplot(111, projection='3d')
+
+surf = ax3d.plot_surface(X, Y, cost_grid, cmap='viridis', alpha=0.75, linewidth=0,
+                          antialiased=True)
+fig.colorbar(surf, ax=ax3d, shrink=0.5, aspect=10, pad=0.1, label='Total Cost ($)')
+
+def _get_cost_at(results_df, sdyd_val, sddc_val):
+    """Return total_cost for the row closest to the given thresholds."""
+    diff = (results_df['sdyd_threshold'] - sdyd_val).abs() + (results_df['sddc_threshold'] - sddc_val).abs()
+    idx = diff.idxmin()
+    return float(results_df.loc[idx, 'total_cost'])
+
+# User-selected marker
+sel_z = _get_cost_at(results_df, sdyd_threshold, sddc_threshold)
+ax3d.scatter([sdyd_threshold], [sddc_threshold], [sel_z],
+             color='red', s=60, zorder=6, marker='+', linewidths=2, label='User selected')
+
+# Percentile markers
+pct_info = [
+    ("25th Percentile", row_q25, 'royalblue', '^'),
+    ("50th Percentile", row_q50, 'green', 's'),
+    ("75th Percentile", row_q75, 'darkorange', 'D'),
+]
+for pct_label, pct_row, pct_color, pct_marker in pct_info:
+    ax3d.scatter(
+        [pct_row['sdyd_threshold']],
+        [pct_row['sddc_threshold']],
+        [float(pct_row['total_cost'])],
+        color=pct_color, s=40, zorder=7, marker=pct_marker, label=pct_label
+    )
+
+ax3d.set_xlabel('Sdyd Threshold (t/ac)', fontsize=8, labelpad=6)
+ax3d.set_ylabel('Sddc Threshold (t)', fontsize=8, labelpad=6)
+ax3d.set_zlabel('Total Cost ($)', fontsize=8, labelpad=6)
+ax3d.set_title('Total Cost vs. Sdyd and Sddc Thresholds', fontsize=10, pad=10)
+ax3d.tick_params(labelsize=6)
+ax3d.legend(fontsize=7, loc='upper right')
+ax3d.view_init(elev=28, azim=35)
+
+plt.tight_layout()
+plt.show()
+```

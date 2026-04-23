@@ -28,7 +28,7 @@ params:
   sddc_threshold: 200
   # Treatments, costs ($/acre), quantity multipliers, and fixed costs (in same order)
   treatments: ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"]
-  treatment_cost: [1000, 1000, 1000]
+  treatment_cost: [2475, 2475, 2475]
   treatment_quantity: [0.5, 1, 2]
   fixed_cost: [500, 1000, 1500]
   # Paths to input data (adjust if needed)
@@ -49,6 +49,8 @@ params:
 ---
 
 > PATH is a decision-support tool to help identify where to prioritize hillslope-level treatment given the user selected catchment, treatments, treatment costs, and sediment thresholds. This report provides a summary of PATH's outputs including tables, plots, and maps of the selected hillslopes and treatments. Section 4 provides additional analysis and interactive exploration of the sediment thresholds and their impact on treatment selection and costs.
+
+**Static PDF Version:** [PATH_CE_Report_PDF.pdf](PATH_CE_Report_PDF.pdf)
 
 ```{=html}
 <script>
@@ -287,8 +289,8 @@ treatments = _to_str_list(
   ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"],
 )
 treatment_cost = _to_num_list(
-  _resolve_value(params.get("treatment_cost"), payload_treatment_cost, [1000, 1000, 1000], payload_enabled),
-  [1000, 1000, 1000],
+  _resolve_value(params.get("treatment_cost"), payload_treatment_cost, [2475, 2475, 2475], payload_enabled),
+  [2475, 2475, 2475],
 )
 treatment_quantity = _to_num_list(
   _resolve_value(params.get("treatment_quantity"), payload_treatment_quantity, [0.5, 1, 2], payload_enabled),
@@ -426,7 +428,7 @@ final_df.to_csv(prepared_hillslope_csv_path, index=False)
 hillslope_data_link = f'<a href="static/downloads/{prepared_hillslope_csv_name}" download>{prepared_hillslope_csv_name}</a>'
 
 # compile parameters for display into a df
-treatment_cost_display = [500, 1000, 2000]
+treatment_cost_display = [1237.50, 2475.00, 4950.00]
 parameter_df = pd.DataFrame({
     " ": [
         "Hillslope Sediment Yield Threshold (tons/acre)",
@@ -618,7 +620,14 @@ treat_colors = {
 untreated_fill = "#e7e9e5"
 
 # 5.5 Build map centered on layer bounds
-m = folium.Map(prefer_canvas=True)
+m = folium.Map(prefer_canvas=True, tiles=None)
+folium.TileLayer(
+    tiles='https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}',
+    attr='© Google',
+    name='Google Terrain',
+    overlay=False,
+    control=True,
+).add_to(m)
 
 try:
     bounds = gdf.to_crs(epsg=4326).total_bounds  # [minx, miny, maxx, maxy]
