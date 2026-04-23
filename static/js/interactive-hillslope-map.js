@@ -104,10 +104,10 @@ async function resolveDeckApi() {
 }
 
 const COLORS = {
-  untreated: [211, 211, 211, 200],
-  tier1: [178, 223, 138, 220],
-  tier2: [51, 160, 44, 220],
-  tier3: [0, 100, 0, 220],
+  untreated: [211, 211, 211, 105],
+  tier1: [178, 223, 138, 145],
+  tier2: [51, 160, 44, 145],
+  tier3: [0, 100, 0, 145],
   outline: [0, 0, 0, 180],
   untreatable: [220, 32, 32, 220],
   channels: [80, 165, 214, 255]
@@ -529,6 +529,7 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
   const mapEl = document.createElement('div');
   mapEl.className = 'hillmap-map';
   mapEl.style.height = `${height}px`;
+  mapEl.style.backgroundColor = '#e8f0f7';
   const legend = document.createElement('div');
   legend.className = 'hillmap-legend';
   const tooltip = document.createElement('div');
