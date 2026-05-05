@@ -48,7 +48,8 @@ params:
   # subcatchments_layer: "Subcatchments"
 ---
 
-> PATH is a decision-support tool to help identify where to prioritize hillslope-level treatment given the user selected catchment, treatments, treatment costs, and sediment thresholds. This report provides a summary of PATH's outputs including tables, plots, and maps of the selected hillslopes and treatments. Section 4 provides additional analysis and interactive exploration of the sediment thresholds and their impact on treatment selection and costs.
+> PATH is a decision-support tool that provides users with information about where to
+prioritize post-fire hillslope-level treatment that minimizes cost, subject to biophysical constraints. It integrates WEPPcloud’s Omni Scenario Runner simulation outputs, which allows the assessment of multiple pre and post treatment scenarios. Users enter their treatment costs, landscape constraints, and biophysical thresholds and PATH identifies hillslopes for treatment using binary integer programming. This report provides a summary of PATH’s outputs including tables, plots, and maps of the selected hillslopes and treatments.
 
 **Static PDF Version:** [PATH_CE_Report_PDF.pdf](PATH_CE_Report_PDF.pdf)
 
