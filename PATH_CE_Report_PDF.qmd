@@ -2,16 +2,26 @@
 title: "PATH Report"
 subtitle: "Auto‑generated summary of PATH outputs"
 abstract: |
-  PATH is a decision-support tool to help identify where to prioritize hillslope-level treatment given the user selected catchment, treatments, treatment costs, and sediment thresholds. This report provides a summary of PATH's outputs including tables, plots, and maps of the selected hillslopes and treatments. Section 3 provides additional analysis of the sediment thresholds and their impact on treatment selection and costs.
+  PATH is a decision-support tool that provides users with information about where to prioritize post-fire hillslope-level treatment that minimizes cost, subject to biophysical constraints. It integrates WEPPcloud’s Omni Scenario Runner simulation outputs, which allows the assessment of multiple pre and post treatment scenarios. Users enter their treatment costs, landscape constraints, and biophysical thresholds and PATH identifies hillslopes for treatment using binary integer programming. This report provides a summary of PATH's outputs including tables, plots, and maps of the selected hillslopes and treatments. Figure 1 illustrates the overall workflow of PATH, from an inital WEPPcloud scenario setup and execution, to data processing and optimization in PATH, to the generation of results and this report.
+
 format:
   pdf:
-    toc: true
+    toc: false
     toc-depth: 3
     number-sections: true
     geometry: "margin=1in, top=0.75in, bottom=0.75in"
     keep-tex: false
     fig-pos: "H"
+    cap-location: top
     colorlinks: true
+    linkcolor: black
+    urlcolor: blue
+    citecolor: black
+header-includes:
+    - |
+        \usepackage{caption}
+        \captionsetup[figure]{position=top,width=0.9\linewidth,font=small,justification=centering,singlelinecheck=false}
+        \captionsetup[table]{position=top,font=small,justification=centering,singlelinecheck=false}
 jupyter: python3
 params:
   weppcloud_payload_json: null
@@ -46,18 +56,30 @@ import matplotlib.colors as mcolors
 from matplotlib.patches import Patch
 import ast
 import io
+import textwrap
 from contextlib import redirect_stdout, redirect_stderr
 
 from PATH_CE import path_data_ag, ce_select_sites_2
 from PATH_Plots import find_threshold_ranges, all_thresholds, plot_sddc_vs_cost, plot_sdyd_vs_cost
+from IPython.display import Markdown, display
+```
+
+
+
+![Simple PATH workflow](simple PATH workflow.png){fig-align="center" fig-width=7}
+
+```{=latex}
+    \tableofcontents
 ```
 
 ## Parameters
 
-The following parameters were used for this PATH run:
+Users have the ability to input values for Hillslope Sediment Yield Threshold, Outlet Sediment Discharge Threshold, Slope Filter Range, Burn Severity filter, Treatments, and Treatment Costs. Using these parameters, along with the WEPPcloud scenario outputs, PATH identifies hillslope-level treatment assignments that minimize total cost while meeting the specified sediment thresholds at the hillslope and outlet scales. Table 1 summarizes the user-entered parameters.
+
 
 ```{python}
 #| echo: false
+#| tbl-cap: "User-entered PATH parameters."
 try:
     params
 except NameError:
@@ -113,6 +135,27 @@ def _to_str_list(value, default):
     if not isinstance(parsed, list):
         parsed = default
     return [str(v) for v in parsed]
+
+def _fmt_2(value):
+    return f"{float(value):.2f}"
+
+def _latex_escape(text):
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    s = str(text)
+    for old, new in replacements.items():
+        s = s.replace(old, new)
+    return s
 
 def _load_weppcloud_payload(quarto_params):
     payload_from_file = quarto_params.get("weppcloud_payload_json")
@@ -257,22 +300,27 @@ final_df = path_data_ag(
     hillslope_char_data=hillslope_chars_csv
 )
 
-parameter_df = pd.DataFrame({
-    "Parameter": [
-        "Hillslope Sediment Yield Threshold (tons/acre)",
-        "Outlet Sediment Discharge Threshold (tons)",
-        "Treatments",
-        "Treatment Cost ($/acre)",
-    ],
-    "Value": [
-        str(sdyd_threshold),
-        str(sddc_threshold),
-        str(treatments),
-        str(treatment_cost),
-    ]
-})
-parameter_df.set_index("Parameter", inplace=True)
-parameter_df
+treatments_display = [
+    f"mulch {treatment}" if not str(treatment).lower().startswith("mulch ") else str(treatment)
+    for treatment in treatments
+]
+treatment_cost_display = [float(cost) * float(quantity) for cost, quantity in zip(treatment_cost, treatment_quantity)]
+treatment_cost_table_value = ", ".join(_fmt_2(value) for value in treatment_cost_display)
+
+parameter_rows = [
+    ("Hillslope Sediment Yield Threshold (tons/acre)", _fmt_2(sdyd_threshold)),
+    ("Outlet Sediment Discharge Threshold (tons)", _fmt_2(sddc_threshold)),
+    ("Slope Filter Range (degrees)", "None"),
+    ("Burn Severity Filter", "None"),
+]
+
+for i, treatment in enumerate(treatments_display, start=1):
+    parameter_rows.append((f"Treatment {i}", treatment))
+
+parameter_rows.append(("Treatment Cost ($/acre)", treatment_cost_table_value))
+
+parameter_df = pd.DataFrame(parameter_rows, columns=["Parameter", "Value"])
+display(Markdown(parameter_df.to_markdown(index=False)))
 ```
 
 ## Run Results
@@ -312,14 +360,15 @@ for t, hills in zip(treatments, treatment_hillslopes):
 assign_df = pd.DataFrame(assignments)
 ```
 
-### Static Map of Selected Hillslopes
+### Map of Selected Hillslopes
 
-The map below shows the selected hillslopes by treatment. Hillslopes outlined in red exceeded the hillslope sediment yield (Sdyd) threshold even after treatment.
+The map below shows the selected hillslopes by treatment. A hillslope outlined in red indicates that the Hillslope Sediment Yield threshold was not met even after treatment.
 
 ```{python}
 #| echo: false
 #| fig-width: 6
-#| fig-height: 5
+#| fig-height: 4.5
+#| fig-pos: "!H"
 #| fig-cap: "Selected hillslopes by treatment assignment. Red outlines indicate hillslopes where the sediment yield threshold could not be met."
 
 def load_subcatchments_gdf(geojson_path):
@@ -358,40 +407,61 @@ def _make_hillslope_map(gdf_map, gdf_channels, assign_df, untreatable_sdyd,
     if standalone:
         fig, ax = plt.subplots(figsize=figsize)
 
+    ax.set_facecolor("#e8f0f7")
+
     def _color(row):
         t = row.get("treatment")
         return treat_colors.get(t, untreated_fill)
 
-    colors = gdf_map.apply(_color, axis=1)
-    gdf_map.plot(ax=ax, color=colors, edgecolor="black", linewidth=0.4)
+    gdf_map_plot = gdf_map.to_crs(epsg=3857)
+
+    colors = gdf_map_plot.apply(_color, axis=1)
+    gdf_map_plot.plot(ax=ax, color=colors, edgecolor="black", linewidth=0.4, alpha=0.8)
+
+    try:
+        import contextily as ctx
+
+        ctx.add_basemap(
+            ax,
+            source="https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}",
+            crs=gdf_map_plot.crs,
+            attribution=False,
+        )
+    except Exception:
+        # Fall back to plain background if web tiles or contextily are unavailable.
+        pass
 
     if gdf_channels is not None and len(gdf_channels) > 0:
-        gdf_channels.to_crs(epsg=4326).plot(ax=ax, color="#50a5d6", linewidth=0.8, zorder=3)
+        gdf_channels.to_crs(epsg=3857).plot(ax=ax, color="#50a5d6", linewidth=0.8, zorder=3)
 
     if untreatable_sdyd is not None and not untreatable_sdyd.empty:
         u_ids = set(untreatable_sdyd["wepp_id"].tolist())
         u_topaz = final_df.loc[final_df["wepp_id"].isin(u_ids), "TopazID"]
-        gdf_u = gdf_map[gdf_map["TopazID"].isin(u_topaz)]
+        gdf_u = gdf_map_plot[gdf_map_plot["TopazID"].isin(u_topaz)]
         if len(gdf_u) > 0:
             gdf_u.plot(ax=ax, facecolor="none", edgecolor="red", linewidth=1.5, zorder=4)
 
     legend_elems = [
         Patch(facecolor=treat_colors.get("0.5 tons/acre", untreated_fill),
-              edgecolor="black", linewidth=0.4, label="0.5 tons/acre"),
+              edgecolor="black", linewidth=0.4, label="mulch 0.5 tons/acre"),
         Patch(facecolor=treat_colors.get("1 tons/acre", untreated_fill),
-              edgecolor="black", linewidth=0.4, label="1 ton/acre"),
+              edgecolor="black", linewidth=0.4, label="mulch 1 tons/acre"),
         Patch(facecolor=treat_colors.get("2 tons/acre", untreated_fill),
-              edgecolor="black", linewidth=0.4, label="2 tons/acre"),
+              edgecolor="black", linewidth=0.4, label="mulch 2 tons/acre"),
         Patch(facecolor=untreated_fill, edgecolor="black", linewidth=0.4, label="Untreated"),
         Line2D([0], [0], color="#50a5d6", linewidth=1.2, label="Channels"),
-        Patch(facecolor="none", edgecolor="red", linewidth=1.5, label="Sdyd threshold not met"),
+        Patch(facecolor="none", edgecolor="red", linewidth=1.5, label="Hillslope Sediment Yield threshold not met"),
     ]
     ax.legend(handles=legend_elems, loc="lower right", fontsize=6, framealpha=0.85,
               borderpad=0.5)
     ax.set_title(title, fontsize=9)
-    ax.set_xlabel("Longitude", fontsize=7)
-    ax.set_ylabel("Latitude", fontsize=7)
-    ax.tick_params(labelsize=6)
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.tick_params(length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
 
     if standalone:
         plt.tight_layout()
@@ -405,14 +475,17 @@ _make_hillslope_map(
     untreatable_sdyd=untreatable_sdyd,
     treat_colors=treat_colors,
     untreated_fill=untreated_fill,
-    title=f"Selected Hillslopes\n(Sdyd threshold = {sdyd_threshold} t/ac, Sddc threshold = {sddc_threshold} t)",
+    
 )
 ```
 
 ### Key Outputs
 
+Tables 2 and 3 summarize the key outputs of the PATH optimization. Table 2 shows the total cost, total outlet sediment discharge reduction, and final outlet sediment discharge after treatment for the resulting treatment scenario. Table 3 summarizes the number of hillslopes assigned to each treatment level. To view the full hillslope-by-hillslope assignment table, please refer to the Appendix at the end of this report.
+
 ```{python}
 #| echo: false
+#| tbl-cap: "The total cost, total outlet sediment discharge reduction, and final outlet sediment discharge after treatment, for the resulting treatment scenario."
 summary = pd.DataFrame({
     "Metric": [
         "Total cost ($)",
@@ -420,18 +493,14 @@ summary = pd.DataFrame({
         "Final outlet sediment discharge (tons)"
     ],
     "Value": [
-        f"${float(total_cost):,.2f}",
-        f"{float(total_Sddc_reduction):,.3f}",
-        f"{float(final_Sddc):,.3f}",
+        f"${_fmt_2(float(total_cost))}",
+        _fmt_2(float(total_Sddc_reduction)),
+        _fmt_2(float(final_Sddc)),
     ]
 })
-summary.set_index("Metric", inplace=True)
-summary
+display(Markdown(summary.to_markdown(index=False)))
 ```
 
-### Combined Hillslope Treatment and Final Sdyd
-
-The table below combines treatment assignment and final hillslope sediment yield (Sdyd). Any hillslope present in the final Sdyd output but missing from treatment assignments is labeled as `No treatment`. Hillslopes with exceeded Sdyd threshold are flagged.
 
 ```{python}
 #| echo: false
@@ -456,20 +525,52 @@ combined_df["sdyd_threshold_exceeded"] = combined_df["wepp_id"].astype("Int64").
 # Ensure integer display for wepp_id (no float formatting)
 combined_df["wepp_id"] = combined_df["wepp_id"].astype("Int64")
 combined_df = combined_df.sort_values("wepp_id").reset_index(drop=True)
-combined_df
+combined_df_display = combined_df[["wepp_id", "final_Sdyd", "treatment"]].rename(columns={
+    "wepp_id": "Wepp ID",
+    "final_Sdyd": "Final Sediment Yield (tons/acre)",
+    "treatment": "Treatment",
+})
+combined_df_display["Final Sediment Yield (tons/acre)"] = combined_df_display["Final Sediment Yield (tons/acre)"].map(_fmt_2)
+
+def _style_appendix_rows(display_df, source_df):
+    """Outline rows in red where final Sdyd exceeds the selected threshold."""
+    styles = pd.DataFrame("", index=display_df.index, columns=display_df.columns)
+    exceeded_mask = source_df["sdyd_threshold_exceeded"].to_numpy()
+
+    for idx, exceeded in enumerate(exceeded_mask):
+        if not exceeded:
+            continue
+
+        row_props = "border-top: 2px solid #c00000; border-bottom: 2px solid #c00000;"
+        for col in styles.columns:
+            styles.loc[idx, col] = row_props
+
+        first_col = styles.columns[0]
+        last_col = styles.columns[-1]
+        styles.loc[idx, first_col] += " border-left: 2px solid #c00000;"
+        styles.loc[idx, last_col] += " border-right: 2px solid #c00000;"
+
+    return styles
+
+combined_df_appendix_styler = (
+    combined_df_display.style
+    .apply(lambda _: _style_appendix_rows(combined_df_display, combined_df), axis=None)
+    .hide(axis="index")
+)
+# combined_df_display is shown in the Appendix — not displayed here
 ```
 
 ```{python}
 #| echo: false
-counts = combined_df.groupby("treatment").size().rename("n_sites").reset_index()
-cost_map = dict(zip(treatments, treatment_cost))
-counts["cost_per_acre ($)"] = counts["treatment"].map(cost_map)
-counts
+#| tbl-cap: "Number of hillslopes assigned to each treatment category."
+counts = combined_df.groupby("treatment").size().rename("Hillslope Count").reset_index()
+counts = counts.rename(columns={"treatment": "Treatment"})
+display(Markdown(counts.to_markdown(index=False)))
 ```
 
 ## Sediment Threshold Analysis
 
-This section provides additional analysis of the Hillslope Sediment Yield and Outlet Sediment Discharge thresholds and their impact on treatment selection and costs.
+This section provides additional analysis of the Hillslope Sediment Yield and Outlet Sediment Discharge thresholds and their impact on treatment selection and costs. 
 
 ```{python}
 #| echo: false
@@ -478,27 +579,49 @@ results_df = pd.read_csv(results_analysis_csv)
 
 ### Hillslope Selection Maps at Threshold Percentiles
 
-The following maps show the hillslopes selected for treatment when the combined sediment thresholds (Sdyd and Sddc) are set at the 25th, 50th, and 75th percentiles of total treatment cost across all evaluated threshold combinations.
+The following maps show the hillslopes selected for treatment using threshold pairs derived from the 25th, 50th, and 75th percentiles of the evaluated Hillslope Sediment Yield and Outlet Sediment Discharge threshold ranges. These maps provide a visual representation of how the spatial distribution of selected hillslopes and treatments change across the range of evaluated thresholds.
 
 ```{python}
 #| echo: false
 #| fig-width: 7
 #| fig-height: 8
-#| fig-cap: "Selected hillslopes at the 25th, 50th, and 75th cost percentiles of the threshold sweep."
+#| fig-cap: "Selected hillslopes for the 25th, 50th, and 75th percentile Sdyd and Sddc threshold pairs, rounded down to the nearest evaluated thresholds."
 
-# Find the Q25, Q50, Q75 total_cost percentiles and closest matching rows
-costs = results_df["total_cost"].values
-q25_cost = np.percentile(costs, 25)
-q50_cost = np.percentile(costs, 50)
-q75_cost = np.percentile(costs, 75)
+# Find percentile threshold pairs using the evaluated Sdyd and Sddc ranges.
+sdyd_thresholds = np.sort(results_df["sdyd_threshold"].dropna().unique())
+sddc_thresholds = np.sort(results_df["sddc_threshold"].dropna().unique())
 
-def _find_closest_row(df, target_cost):
-    idx = (df["total_cost"] - target_cost).abs().idxmin()
-    return df.loc[idx]
+def _round_down_to_available(values, target):
+    eligible = values[values <= target]
+    if len(eligible) == 0:
+        return float(values.min())
+    return float(eligible.max())
 
-row_q25 = _find_closest_row(results_df, q25_cost)
-row_q50 = _find_closest_row(results_df, q50_cost)
-row_q75 = _find_closest_row(results_df, q75_cost)
+def _get_percentile_threshold_row(df, percentile):
+    target_sdyd = float(np.percentile(sdyd_thresholds, percentile))
+    target_sddc = float(np.percentile(sddc_thresholds, percentile))
+    selected_sdyd = _round_down_to_available(sdyd_thresholds, target_sdyd)
+    selected_sddc = _round_down_to_available(sddc_thresholds, target_sddc)
+
+    matches = df[
+        (df["sdyd_threshold"] == selected_sdyd)
+        & (df["sddc_threshold"] == selected_sddc)
+    ]
+    if matches.empty:
+        raise ValueError(
+            f"No evaluated threshold pair found for Sdyd={selected_sdyd} and Sddc={selected_sddc}."
+        )
+
+    row = matches.sort_values("total_cost", kind="stable").iloc[0].copy()
+    row["target_sdyd_percentile_value"] = target_sdyd
+    row["target_sddc_percentile_value"] = target_sddc
+    row["selected_sdyd_threshold"] = selected_sdyd
+    row["selected_sddc_threshold"] = selected_sddc
+    return row
+
+row_q25 = _get_percentile_threshold_row(results_df, 25)
+row_q50 = _get_percentile_threshold_row(results_df, 50)
+row_q75 = _get_percentile_threshold_row(results_df, 75)
 
 percentile_rows = [
     ("25th Percentile", row_q25),
@@ -506,37 +629,106 @@ percentile_rows = [
     ("75th Percentile", row_q75),
 ]
 
-def _build_gdf_for_row(row, gdf_sub, final_df, treatments):
-    """Build a merged GeoDataFrame with treatment assignment for a given results_df row."""
-    th_hillslopes = ast.literal_eval(row["treatment_hillslopes"]) if isinstance(row["treatment_hillslopes"], str) else row["treatment_hillslopes"]
+def _build_gdf_for_row(row, gdf_sub, final_df, treatments, treatment_cost, treatment_quantity, fixed_cost):
+    """Build a merged GeoDataFrame for the exact threshold pair shown in the title.
+
+    Primary path: recompute assignments from ce_select_sites_2 at row thresholds.
+    Fallback path: parse assignments from serialized CSV columns.
+    """
+    sdyd_val = float(row["sdyd_threshold"])
+    sddc_val = float(row["sddc_threshold"])
+
+    th_hillslopes = []
+    untreatable_df = pd.DataFrame(columns=["wepp_id", "final_Sdyd"])
+
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            (
+                _status,
+                _treatment_cost_vectors,
+                _sediment_yield_reduction_thresholds,
+                _selected_hillslopes,
+                th_hillslopes,
+                _total_Sddc_reduction,
+                _final_Sddc,
+                _hillslopes_sdyd,
+                _sdyd_df,
+                untreatable_recomputed,
+                _total_cost,
+                _total_fixed_cost,
+            ) = ce_select_sites_2(
+                data=final_df,
+                treatments=treatments,
+                treatment_cost=treatment_cost,
+                treatment_quantity=treatment_quantity,
+                fixed_cost=fixed_cost,
+                sdyd_threshold=sdyd_val,
+                sddc_threshold=sddc_val,
+                slope_range=(None),
+                bs_threshold=(None),
+            )
+        if isinstance(_sdyd_df, pd.DataFrame) and {"wepp_id", "final_Sdyd"}.issubset(_sdyd_df.columns):
+            sdyd_recomputed = _sdyd_df.copy()
+            sdyd_recomputed["wepp_id"] = pd.to_numeric(sdyd_recomputed["wepp_id"], errors="coerce").astype("Int64")
+            sdyd_recomputed["final_Sdyd"] = pd.to_numeric(sdyd_recomputed["final_Sdyd"], errors="coerce")
+            untreatable_df = sdyd_recomputed[sdyd_recomputed["final_Sdyd"] > sdyd_val][["wepp_id", "final_Sdyd"]].copy()
+        elif isinstance(untreatable_recomputed, pd.DataFrame):
+            untreatable_df = untreatable_recomputed.copy()
+    except Exception:
+        th_hillslopes_raw = row.get("treatment_hillslopes", [])
+        if isinstance(th_hillslopes_raw, str):
+            try:
+                th_hillslopes_raw = ast.literal_eval(th_hillslopes_raw)
+            except Exception:
+                th_hillslopes_raw = []
+        th_hillslopes = th_hillslopes_raw if isinstance(th_hillslopes_raw, list) else []
+
+        untreatable_raw = row.get("untreatable_sdyd", None)
+        if isinstance(untreatable_raw, str):
+            import re
+            # Serialized DataFrame rows are typically: "<row_index> <wepp_id> <final_Sdyd>"
+            pattern = r'^\s*\d+\s+(\d+)\s+[-+]?\d*\.?\d+.*$'
+            wepp_ids = [
+                int(m.group(1))
+                for line in untreatable_raw.split('\n')
+                if (m := re.match(pattern, line))
+            ]
+            untreatable_df = pd.DataFrame({"wepp_id": wepp_ids})
+
+    if len(th_hillslopes) < len(treatments):
+        th_hillslopes = th_hillslopes + ([[]] * (len(treatments) - len(th_hillslopes)))
+
     th_assignments = []
-    for t, hills in zip(treatments, th_hillslopes):
+    for t, hills in zip(treatments, th_hillslopes[:len(treatments)]):
+        hills = hills if isinstance(hills, list) else []
         for h in hills:
             th_assignments.append({"wepp_id": h, "treatment": t})
     th_assign = pd.DataFrame(th_assignments) if th_assignments else pd.DataFrame(columns=["wepp_id", "treatment"])
-
-    untreatable_raw = row.get("untreatable_sdyd", None)
-    if pd.isna(untreatable_raw) if not isinstance(untreatable_raw, str) else False:
-        untreatable_df = pd.DataFrame(columns=["wepp_id", "final_Sdyd"])
-    elif isinstance(untreatable_raw, str):
-        import re
-        pattern = r'^\s*(\d+)\s+[\d\.]+.*$'
-        wepp_ids = [int(m.group(1)) for line in untreatable_raw.split('\n')
-                    if (m := re.match(pattern, line))]
-        untreatable_df = pd.DataFrame({"wepp_id": wepp_ids})
-    else:
-        untreatable_df = pd.DataFrame(columns=["wepp_id", "final_Sdyd"])
+    if not th_assign.empty:
+        th_assign["wepp_id"] = pd.to_numeric(th_assign["wepp_id"], errors="coerce").astype("Int64")
 
     attrs = final_df[["wepp_id", "TopazID"]].copy()
+    attrs["wepp_id"] = pd.to_numeric(attrs["wepp_id"], errors="coerce").astype("Int64")
     attrs = attrs.merge(th_assign, on="wepp_id", how="left")
     gdf = gdf_sub.to_crs(epsg=4326).merge(attrs, on="TopazID", how="left")
     return gdf, untreatable_df
 
 fig, axes = plt.subplots(3, 1, figsize=(7, 12))
 for ax, (label, row) in zip(axes, percentile_rows):
-    gdf_p, untreat_p = _build_gdf_for_row(row, gdf_sub, final_df, treatments)
-    title = (f"{label}  |  Sdyd={row['sdyd_threshold']:.0f} t/ac, "
-             f"Sddc={row['sddc_threshold']:.0f} t  |  Cost: ${float(row['total_cost']):,.0f}")
+    gdf_p, untreat_p = _build_gdf_for_row(
+        row,
+        gdf_sub,
+        final_df,
+        treatments,
+        treatment_cost,
+        treatment_quantity,
+        fixed_cost,
+    )
+    title = (
+        f"{label} Threshold Pair  |  Hillslope Sediment Yield={_fmt_2(row['sdyd_threshold'])} tons/acre, "
+        f"Outlet Sediment Discharge={_fmt_2(row['sddc_threshold'])} tons  |  "
+        f"Cost: ${_fmt_2(float(row['total_cost']))}"
+    )
     _make_hillslope_map(
         gdf_map=gdf_p,
         gdf_channels=gdf_channels,
@@ -554,29 +746,41 @@ plt.show()
 
 ### Cost vs. Threshold Visualizations
 
-The following plots show the relationship between total cost and the two sediment thresholds.
+The following response curves show how total treatment cost changes when one threshold is varied while the other is held fixed at the user-selected value. Together they help distinguish which threshold is most strongly constraining the optimization and where additional tightening of thresholds produces disproportionately large cost increases. 
+
+The first plot isolates the effect of changing the Hillslope Sediment Yield threshold while holding the Outlet Sediment Discharge threshold constant. A steeper slope in this curve indicates that small reductions in allowable hillslope sediment yield require substantially greater investment. The second plot performs the complementary analysis for the outlet sediment threshold. 
 
 ```{python}
 #| echo: false
-#| fig-width: 5.5
-#| fig-height: 7
-#| fig-cap: "Total treatment cost as a function of each sediment threshold."
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(5.5, 7))
-plot_sdyd_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc_threshold, ax=ax1)
-plot_sddc_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc_threshold, ax=ax2)
+#| fig-width: 6.25
+#| fig-height: 3.4
+#| fig-cap: "Total treatment cost as a function of the Hillslope Sediment Yield threshold, with the Outlet Sediment Discharge threshold fixed at the user-selected value."
+fig, ax = plt.subplots(figsize=(6.25, 3.4))
+plot_sdyd_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc_threshold, ax=ax)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| echo: false
+#| fig-width: 6.25
+#| fig-height: 3.4
+#| fig-cap: "Total treatment cost as a function of the Outlet Sediment Discharge threshold, with the Hillslope Sediment Yield threshold fixed at the user-selected value."
+fig, ax = plt.subplots(figsize=(6.25, 3.4))
+plot_sddc_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc_threshold, ax=ax)
 plt.tight_layout()
 plt.show()
 ```
 
 ### Total Cost Surface
 
-The surface below shows total treatment cost across all evaluated combinations of the two sediment thresholds. The red marker (+) indicates the user-selected thresholds. The blue (25th), green (50th), and orange (75th) markers indicate the three cost percentile scenarios shown in the maps above.
+The surface below shows total treatment cost across all evaluated combinations of the two sediment thresholds. The red marker (+) indicates the user-selected thresholds. The blue (25th), green (50th), and orange (75th) markers indicate the percentile-based Sdyd and Sddc threshold pairs used in the maps above.
 
 ```{python}
 #| echo: false
 #| fig-width: 7
 #| fig-height: 6
-#| fig-cap: "3D cost surface with user-selected and percentile threshold markers."
+#| fig-cap: "3D cost surface with user-selected thresholds and the 25th, 50th, and 75th percentile Sdyd and Sddc threshold-pair markers."
 
 frames_data = []
 for i in range(len(results_df)):
@@ -612,7 +816,8 @@ def _get_cost_at(results_df, sdyd_val, sddc_val):
 # User-selected marker
 sel_z = _get_cost_at(results_df, sdyd_threshold, sddc_threshold)
 ax3d.scatter([sdyd_threshold], [sddc_threshold], [sel_z],
-             color='red', s=60, zorder=6, marker='+', linewidths=2, label='User selected')
+             color='red', s=60, zorder=6, marker='+', linewidths=2,
+             label=f'User selected, Total Cost: {_fmt_2(sel_z)}')
 
 # Percentile markers
 pct_info = [
@@ -621,21 +826,39 @@ pct_info = [
     ("75th Percentile", row_q75, 'darkorange', 'D'),
 ]
 for pct_label, pct_row, pct_color, pct_marker in pct_info:
+    pct_cost = float(pct_row['total_cost'])
     ax3d.scatter(
         [pct_row['sdyd_threshold']],
         [pct_row['sddc_threshold']],
-        [float(pct_row['total_cost'])],
-        color=pct_color, s=40, zorder=7, marker=pct_marker, label=pct_label
+        [pct_cost],
+        color=pct_color,
+        s=40,
+        zorder=7,
+        marker=pct_marker,
+        label=f'{pct_label}, Total Cost: {_fmt_2(pct_cost)}'
     )
 
-ax3d.set_xlabel('Sdyd Threshold (t/ac)', fontsize=8, labelpad=6)
-ax3d.set_ylabel('Sddc Threshold (t)', fontsize=8, labelpad=6)
+ax3d.set_xlabel('Hillslope Sediment Yield Threshold (tons/acre)', fontsize=8, labelpad=6)
+ax3d.set_ylabel('Outlet Sediment Discharge Threshold (tons)', fontsize=8, labelpad=6)
 ax3d.set_zlabel('Total Cost ($)', fontsize=8, labelpad=6)
-ax3d.set_title('Total Cost vs. Sdyd and Sddc Thresholds', fontsize=10, pad=10)
 ax3d.tick_params(labelsize=6)
 ax3d.legend(fontsize=7, loc='upper right')
 ax3d.view_init(elev=28, azim=35)
 
 plt.tight_layout()
 plt.show()
+```
+
+```{=latex}
+\newpage
+```
+
+## Appendix: Hillslope-Level Treatment Results {.unnumbered}
+
+Table 4 provides the full hillslope-by-hillslope treatment assignment and final Hillslope Sediment Yield values. Any hillslope where the final sediment yield exceeds the user-selected threshold is outlined in red. This table allows for detailed examination of how individual hillslopes were treated and their resulting sediment yields.
+
+```{python}
+#| echo: false
+#| tbl-cap: "Full hillslope-level treatment assignment and final Hillslope Sediment Yield. Rows outlined in red exceed the user-selected Hillslope Sediment Yield threshold."
+combined_df_appendix_styler
 ```

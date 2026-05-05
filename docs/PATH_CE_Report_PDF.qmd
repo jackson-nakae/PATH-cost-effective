@@ -478,27 +478,49 @@ results_df = pd.read_csv(results_analysis_csv)
 
 ### Hillslope Selection Maps at Threshold Percentiles
 
-The following maps show the hillslopes selected for treatment when the combined sediment thresholds (Sdyd and Sddc) are set at the 25th, 50th, and 75th percentiles of total treatment cost across all evaluated threshold combinations.
+The following maps show the hillslopes selected for treatment using threshold pairs derived from the 25th, 50th, and 75th percentiles of the evaluated Hillslope Sediment Yield and Outlet Sediment Discharge threshold ranges. For each percentile, the Sdyd and Sddc percentile values are rounded down to the nearest threshold combination that was actually evaluated in the threshold sweep.
 
 ```{python}
 #| echo: false
 #| fig-width: 7
 #| fig-height: 8
-#| fig-cap: "Selected hillslopes at the 25th, 50th, and 75th cost percentiles of the threshold sweep."
+#| fig-cap: "Selected hillslopes for the 25th, 50th, and 75th percentile Sdyd and Sddc threshold pairs, rounded down to the nearest evaluated thresholds."
 
-# Find the Q25, Q50, Q75 total_cost percentiles and closest matching rows
-costs = results_df["total_cost"].values
-q25_cost = np.percentile(costs, 25)
-q50_cost = np.percentile(costs, 50)
-q75_cost = np.percentile(costs, 75)
+# Find percentile threshold pairs using the evaluated Sdyd and Sddc ranges.
+sdyd_thresholds = np.sort(results_df["sdyd_threshold"].dropna().unique())
+sddc_thresholds = np.sort(results_df["sddc_threshold"].dropna().unique())
 
-def _find_closest_row(df, target_cost):
-    idx = (df["total_cost"] - target_cost).abs().idxmin()
-    return df.loc[idx]
+def _round_down_to_available(values, target):
+    eligible = values[values <= target]
+    if len(eligible) == 0:
+        return float(values.min())
+    return float(eligible.max())
 
-row_q25 = _find_closest_row(results_df, q25_cost)
-row_q50 = _find_closest_row(results_df, q50_cost)
-row_q75 = _find_closest_row(results_df, q75_cost)
+def _get_percentile_threshold_row(df, percentile):
+    target_sdyd = float(np.percentile(sdyd_thresholds, percentile))
+    target_sddc = float(np.percentile(sddc_thresholds, percentile))
+    selected_sdyd = _round_down_to_available(sdyd_thresholds, target_sdyd)
+    selected_sddc = _round_down_to_available(sddc_thresholds, target_sddc)
+
+    matches = df[
+        (df["sdyd_threshold"] == selected_sdyd)
+        & (df["sddc_threshold"] == selected_sddc)
+    ]
+    if matches.empty:
+        raise ValueError(
+            f"No evaluated threshold pair found for Sdyd={selected_sdyd} and Sddc={selected_sddc}."
+        )
+
+    row = matches.sort_values("total_cost", kind="stable").iloc[0].copy()
+    row["target_sdyd_percentile_value"] = target_sdyd
+    row["target_sddc_percentile_value"] = target_sddc
+    row["selected_sdyd_threshold"] = selected_sdyd
+    row["selected_sddc_threshold"] = selected_sddc
+    return row
+
+row_q25 = _get_percentile_threshold_row(results_df, 25)
+row_q50 = _get_percentile_threshold_row(results_df, 50)
+row_q75 = _get_percentile_threshold_row(results_df, 75)
 
 percentile_rows = [
     ("25th Percentile", row_q25),
@@ -535,7 +557,7 @@ def _build_gdf_for_row(row, gdf_sub, final_df, treatments):
 fig, axes = plt.subplots(3, 1, figsize=(7, 12))
 for ax, (label, row) in zip(axes, percentile_rows):
     gdf_p, untreat_p = _build_gdf_for_row(row, gdf_sub, final_df, treatments)
-    title = (f"{label}  |  Sdyd={row['sdyd_threshold']:.0f} t/ac, "
+    title = (f"{label} Threshold Pair  |  Sdyd={row['sdyd_threshold']:.0f} t/ac, "
              f"Sddc={row['sddc_threshold']:.0f} t  |  Cost: ${float(row['total_cost']):,.0f}")
     _make_hillslope_map(
         gdf_map=gdf_p,
@@ -570,13 +592,13 @@ plt.show()
 
 ### Total Cost Surface
 
-The surface below shows total treatment cost across all evaluated combinations of the two sediment thresholds. The red marker (+) indicates the user-selected thresholds. The blue (25th), green (50th), and orange (75th) markers indicate the three cost percentile scenarios shown in the maps above.
+The surface below shows total treatment cost across all evaluated combinations of the two sediment thresholds. The red marker (+) indicates the user-selected thresholds. The blue (25th), green (50th), and orange (75th) markers indicate the percentile-based Sdyd and Sddc threshold pairs used in the maps above.
 
 ```{python}
 #| echo: false
 #| fig-width: 7
 #| fig-height: 6
-#| fig-cap: "3D cost surface with user-selected and percentile threshold markers."
+#| fig-cap: "3D cost surface with user-selected thresholds and the 25th, 50th, and 75th percentile Sdyd and Sddc threshold-pair markers."
 
 frames_data = []
 for i in range(len(results_df)):

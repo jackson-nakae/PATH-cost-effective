@@ -463,9 +463,9 @@ function renderLegend(container, selection) {
 
   const items = [
     {label: 'Untreated', color: COLORS.untreated},
-    {label: '0.5 tons/acre', color: COLORS.tier1},
-    {label: '1 tons/acre', color: COLORS.tier2},
-    {label: '2 tons/acre', color: COLORS.tier3},
+    {label: 'mulch 0.5 tons/acre', color: COLORS.tier1},
+    {label: 'mulch 1 tons/acre', color: COLORS.tier2},
+    {label: 'mulch 2 tons/acre', color: COLORS.tier3},
     {label: 'Hillslope Sdyd threshold not met', color: COLORS.untreatable, outlineOnly: true}
   ];
 
@@ -585,13 +585,13 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       return 'Hillslope Sdyd threshold not met';
     }
     if (selection.tier3Set?.has(weppId)) {
-      return '2 tons/acre';
+      return 'mulch 2 tons/acre';
     }
     if (selection.tier2Set?.has(weppId)) {
-      return '1 tons/acre';
+      return 'mulch 1 tons/acre';
     }
     if (selection.tier1Set?.has(weppId)) {
-      return '0.5 tons/acre';
+      return 'mulch 0.5 tons/acre';
     }
     return 'Untreated';
   }

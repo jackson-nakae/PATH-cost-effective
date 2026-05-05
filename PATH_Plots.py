@@ -181,7 +181,7 @@ def all_thresholds(data, treatments, treatment_cost, treatment_quantity, fixed_c
 
 def plot_sddc_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=None, figsize=(10, 6)):
     """
-    Plot Sddc threshold vs total cost from results_df for a fixed Sdyd threshold.
+    Plot Outlet Sediment Discharge threshold vs total cost from results_df for a fixed Hillslope Sediment Yield threshold.
 
     Parameters
     - results_df: DataFrame with columns ['sddc_threshold','sdyd_threshold','total_cost']
@@ -212,10 +212,14 @@ def plot_sddc_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=Non
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
 
-    ax.plot(x, y_plot, linestyle='-', color='C0', label=f'Sdyd = {sdyd_threshold}')
-    ax.set_xlabel('Sddc Threshold (t)')
+    ax.plot(x, y_plot, linestyle='-', color='C0', label=f'Hillslope Sediment Yield threshold = {sdyd_threshold}')
+    ax.set_xlabel('Outlet Sediment Discharge Threshold (tons)')
     ax.set_ylabel(ylabel)
-    ax.set_title(f'Total Cost vs Outlet Sediment Discharge Threshold (Sdyd threshold (t/ac) = {sdyd_threshold})', fontsize=11)
+    ax.set_title(
+        f'Total Cost vs Outlet Sediment Discharge Threshold '
+        f'(Hillslope Sediment Yield threshold (tons/acre) = {sdyd_threshold})',
+        fontsize=11,
+    )
     ax.grid(True, linestyle=':', alpha=0.6)
 
     #Indicate the location of the specified sdyd_threshold with arrow and dot
@@ -239,7 +243,7 @@ def plot_sddc_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=Non
 
 def plot_sdyd_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=None, figsize=(10, 6)):
     """
-    Plot Sdyd threshold vs total cost from results_df for a fixed Sddc threshold.
+    Plot Hillslope Sediment Yield threshold vs total cost from results_df for a fixed Outlet Sediment Discharge threshold.
 
     Parameters
     - results_df: DataFrame with columns ['sddc_threshold','sdyd_threshold','total_cost']
@@ -276,10 +280,14 @@ def plot_sdyd_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=Non
         fig, ax = plt.subplots(figsize=figsize)
 
 
-    ax.plot(x, y_plot, linestyle='-', color='C0', label=f'Sddc = {sddc_threshold}')
-    ax.set_xlabel('Sdyd Threshold (t/ac)')
+    ax.plot(x, y_plot, linestyle='-', color='C0', label=f'Outlet Sediment Discharge threshold = {sddc_threshold}')
+    ax.set_xlabel('Hillslope Sediment Yield Threshold (tons/acre)')
     ax.set_ylabel(ylabel)
-    ax.set_title(f'Total Cost vs Hillslope Sediment Yield Threshold (Sddc threshold (t) = {sddc_threshold})', fontsize=11)
+    ax.set_title(
+        f'Total Cost vs Hillslope Sediment Yield Threshold '
+        f'(Outlet Sediment Discharge threshold (tons) = {sddc_threshold})',
+        fontsize=11,
+    )
     ax.grid(True, linestyle=':', alpha=0.6)
     
     # Indicate the location of the specified sdyd_threshold with arrow and dot

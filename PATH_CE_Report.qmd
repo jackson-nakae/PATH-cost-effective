@@ -195,6 +195,9 @@ def _to_str_list(value, default):
     parsed = default
   return [str(v) for v in parsed]
 
+def _fmt_2(value):
+  return f"{float(value):.2f}"
+
 def _load_weppcloud_payload(quarto_params):
   payload_from_file = quarto_params.get("weppcloud_payload_json")
   payload_inline = quarto_params.get("weppcloud_payload_inline")
@@ -428,7 +431,11 @@ final_df.to_csv(prepared_hillslope_csv_path, index=False)
 hillslope_data_link = f'<a href="static/downloads/{prepared_hillslope_csv_name}" download>{prepared_hillslope_csv_name}</a>'
 
 # compile parameters for display into a df
-treatment_cost_display = [1237.50, 2475.00, 4950.00]
+treatment_cost_display = [_fmt_2(v) for v in [1237.50, 2475.00, 4950.00]]
+treatments_display = [
+  f"mulch {treatment}" if not str(treatment).lower().startswith("mulch ") else str(treatment)
+  for treatment in treatments
+]
 parameter_df = pd.DataFrame({
     " ": [
         "Hillslope Sediment Yield Threshold (tons/acre)",
@@ -444,11 +451,11 @@ parameter_df = pd.DataFrame({
         "Channels Spatial Layer",
     ],
     "  ": [
-        sdyd_threshold,
-        sddc_threshold,
+        _fmt_2(sdyd_threshold),
+        _fmt_2(sddc_threshold),
       None,
       None,
-    treatments,
+    treatments_display,
     treatment_cost_display,
         #treatment_quantity,
         #fixed_cost,
@@ -746,25 +753,48 @@ summary = pd.DataFrame({
         "Final outlet sediment discharge (tons)"
     ],
     "value": [
-        float(total_cost),
+      _fmt_2(total_cost),
         #float(total_fixed_cost),
-        float(total_Sddc_reduction),
-        float(final_Sddc),
+      _fmt_2(total_Sddc_reduction),
+      _fmt_2(final_Sddc),
     ]
 })
 summary
 ```
 
-### 2.3 Selected Hillslopes by Treatment
-The following table shows the hillslope assignments by treatment.
+### 2.3 Hillslope Treatment and Final Sediment Yield
+The following table shows the treatment assignment and final hillslope sediment yield. Hillslopes with final sediment yield above the threshold are highlighted in red. You can also download the full table as a CSV for further analysis.
 
 ```{=html}
-<div style="max-height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 8px;">
+<div style="max-height: 450px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 8px;">
 ```
 
 ```{python}
 #| echo: false
-assign_df.sort_values(["treatment","wepp_id"]).reset_index(drop=True)
+assign_clean = assign_df.copy()
+if not assign_clean.empty:
+  assign_clean["wepp_id"] = pd.to_numeric(assign_clean["wepp_id"], errors="coerce").astype("Int64")
+
+sdyd_clean = sdyd_df.copy()
+sdyd_clean["wepp_id"] = pd.to_numeric(sdyd_clean["wepp_id"], errors="coerce").astype("Int64")
+
+combined_df = sdyd_clean.merge(assign_clean[["wepp_id", "treatment"]], on="wepp_id", how="left")
+combined_df["treatment"] = combined_df["treatment"].fillna("No treatment")
+
+u_ids = set(
+  pd.to_numeric(untreatable_sdyd["wepp_id"], errors="coerce").dropna().astype(int).tolist()
+) if not untreatable_sdyd.empty else set()
+combined_df["sdyd_threshold_exceeded"] = combined_df["wepp_id"].astype("Int64").isin(u_ids)
+combined_df["wepp_id"] = combined_df["wepp_id"].astype("Int64")
+combined_df = combined_df.sort_values("wepp_id").reset_index(drop=True)
+
+combined_df_display = combined_df[["wepp_id", "final_Sdyd", "treatment"]].rename(columns={
+  "wepp_id": "Wepp ID",
+  "final_Sdyd": "Final Sediment Yield",
+  "treatment": "Treatment",
+})
+combined_df_display["Final Sediment Yield"] = combined_df_display["Final Sediment Yield"].map(_fmt_2)
+display(HTML(combined_df_display.to_html(index=False)))
 ```
 
 ```{=html}
@@ -773,71 +803,23 @@ assign_df.sort_values(["treatment","wepp_id"]).reset_index(drop=True)
 
 ```{python}
 #| echo: false
-counts = assign_df.groupby("treatment").size().rename("n_sites").reset_index()
-counts["cost_per_acre"] = counts["treatment"].map(dict(zip(treatments, treatment_cost)))
-counts
+treatment_summary_csv_name = "PATH_hillslope_treatment_summary.csv"
+combined_df_display.to_csv(download_dir / treatment_summary_csv_name, index=False)
 
-selected_hillslopes_csv_name = "PATH_selected_hillslopes.csv"
-selected_hillslopes_csv_path = download_dir / selected_hillslopes_csv_name
-assign_df.to_csv(selected_hillslopes_csv_path, index=False)
-
-
-```
-
-```{=html}
-<div>
-<h4></h4>
-
-<ul>
-
-<li><a href="static/downloads/PATH_selected_hillslopes.csv" download>PATH_selected_hillslopes.csv</a></li>
-
-</ul>
-</div>
-```
-
-### 2.4 Final Hillslope Sediment Yield by Hillslope 
-The following table shows the final hillslope sediment yield (Sdyd) by hillslope after treatment. Hillslopes outlined in red exceeded the hillslope sediment yield threshold even after treatment.
-
-```{=html}
-<div style="max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 8px;">
-```
-
-```{python}
-#| echo: false
-# ensure correct dtypes/labels
-
-def highlight_untreatable(row):
-    if row['wepp_id'] in untreatable_sdyd['wepp_id'].values:
-        return ['border: 2px solid red'] * len(row)
-    else:
-        return [''] * len(row)
-
-sdyd_df_sorted = sdyd_df.sort_values("wepp_id").reset_index(drop=True)
-untreatable_sorted = untreatable_sdyd.sort_values("wepp_id").reset_index(drop=True)
-
-
-display(sdyd_df_sorted.style.apply(highlight_untreatable, axis=1))
-
-final_sdyd_csv_name = "PATH_final_sdyd_by_hillslope.csv"
 threshold_exceeded_csv_name = "PATH_sdyd_threshold_exceeded.csv"
-sdyd_df_sorted.to_csv(download_dir / final_sdyd_csv_name, index=False)
-untreatable_sorted.to_csv(download_dir / threshold_exceeded_csv_name, index=False)
+untreatable_sdyd.sort_values("wepp_id").reset_index(drop=True).to_csv(download_dir / threshold_exceeded_csv_name, index=False)
 
 ```
 
-```{=html}
-</div>
-```
 ```{=html}
 <div>
 <h4></h4>
 
 <ul>
-
-<li><a href="static/downloads/PATH_final_sdyd_by_hillslope.csv" download>PATH_final_sdyd_by_hillslope.csv</a></li>
-<li><a href="static/downloads/PATH_sdyd_threshold_exceeded.csv" download>PATH_sdyd_threshold_exceeded.csv</a></li>
+<li><a href="static/downloads/PATH_hillslope_treatment_summary.csv" download>PATH_hillslope_treatment_summary.csv</a> — Wepp ID, Final Sediment Yield, and Treatment assignment for all hillslopes</li>
+<li><a href="static/downloads/PATH_sdyd_threshold_exceeded.csv" download>PATH_sdyd_threshold_exceeded.csv</a> — Hillslopes where Sediment Yield threshold was not met after treatment</li>
 </ul>
+
 </div>
 ```
 
@@ -856,10 +838,10 @@ sddc_threshold_range, sdyd_threshold_range = find_threshold_ranges(
     step_size=5,
     tolerance=1e-2,
 )
-print(f"Minimum Outlet Sediment Discharge Threshold: {sddc_threshold_range[0]}")
-print(f"Maximum Outlet Sediment Discharge Threshold: {sddc_threshold_range[1]}")
-print(f"Minimum Hillslope Sediment Yield Threshold: {sdyd_threshold_range[0]}")
-print(f"Maximum Hillslope Sediment Yield Threshold: {sdyd_threshold_range[1]}")
+# print(f"Minimum Outlet Sediment Discharge Threshold: {sddc_threshold_range[0]}")
+# print(f"Maximum Outlet Sediment Discharge Threshold: {sddc_threshold_range[1]}")
+# print(f"Minimum Hillslope Sediment Yield Threshold: {sdyd_threshold_range[0]}")
+# print(f"Maximum Hillslope Sediment Yield Threshold: {sdyd_threshold_range[1]}")
 
 # run all combinations to get final_df for plotting
 # results_df = all_thresholds(
@@ -989,7 +971,7 @@ The following ranges indicate the minimum and maximum thresholds for sddc and sd
 
 
 ### 3.2 Cost vs. Threshold Vizualizations
-The following plots and interactive visualizations show the relationship between total cost and the two sediment thresholds; sediment discharge (Sddc) and sediment yield (Sdyd). Explore how changing the thresholds impacts the hillslopes selected and the total cost of treatment.
+The following response curves show how total treatment cost changes when one threshold is varied while the other is held fixed at the user-selected value. Together they help distinguish which threshold is most strongly constraining the optimization and where additional tightening of thresholds produces disproportionately large cost increases. The first plot isolates the effect of changing the Hillslope Sediment Yield threshold while holding the Outlet Sediment Discharge threshold constant. A steeper slope in this curve indicates that small reductions in allowable hillslope sediment yield require substantially greater investment. The second plot performs the complementary analysis for the outlet sediment threshold.
 ```{python}
 #| echo: false
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(5, 7))
@@ -998,6 +980,9 @@ plot_sdyd_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc
 plot_sddc_vs_cost(results_df, sdyd_threshold=sdyd_threshold, sddc_threshold=sddc_threshold, ax=ax2)
 plt.tight_layout()
 ```
+
+The 3D surface plot below shows how total cost varies across the full range of threshold combinations. The point highlighted in red corresponds to the user-selected thresholds. This visualization can help identify whether the optimization is more sensitive to one threshold versus the other, and whether there are any non-linear interactions between the thresholds that lead to disproportionate cost increases in certain regions of the parameter space.
+
 ```{python}
 #| echo: false
 
