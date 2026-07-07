@@ -1,168 +1,327 @@
-def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity, 
+import os
+import ast
+from contextlib import redirect_stderr, redirect_stdout
+
+import numpy as np
+import pandas as pd
+
+from PATH_CE import ce_select_sites_flexible
+
+def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity,
                                     fixed_cost, step_size=5, tolerance=1e-6):
     """
-    Find SDDC threshold range by:
-    - Decreasing SDDC by `step_size` until model status == 0 (infeasible)
-    - Then increasing by 1 until status == 1 (feasible). That SDDC is the lower bound.
+    Find SDDC/SDYD ranges and the minimum feasible SDDC threshold.
+
+    This implementation uses binary search on SDDC feasibility, which reduces
+    solve count from O(N) threshold scans to O(log N) model solves.
 
     Returns:
     - sddc_threshold_range: (lower_bound_sddc, max_sddc_threshold)
     - sdyd_threshold_range: (min_sdyd_threshold, max_sdyd_threshold)
+    - sddc_threshold: lower_bound_sddc (minimum feasible SDDC)
+    - sdyd_threshold: max_sdyd_val (maximum SDYD)
     """
     import pandas as pd
-    import numpy as np
     import os
     from contextlib import redirect_stdout, redirect_stderr
 
-    from PATH_CE import ce_select_sites_2
-
-    # Determine Sdyd min/max from data based on post-treat columns for provided treatments
+    # Determine Sdyd min/max from data based on post-treat columns for provided treatments.
     sdyd_treatments = []
     for i in range(len(treatments)):
-        sdyd_treatment = 'Sdyd post-treat ' + treatments[i]
+        sdyd_treatment = "Sdyd post-treat " + treatments[i]
         sdyd_treatments.append(sdyd_treatment)
 
-    max_sdyd_val = int(data['Sdyd post-fire'].max()) + 1
+    max_sdyd_val = int(data["Sdyd post-fire"].max()) + 1
     try:
         min_sdyd_val = data[sdyd_treatments].min().min()
     except Exception:
-        # Fallback if post-treat columns differ; use post-fire min
-        min_sdyd_val = data['Sdyd post-fire'].min()
+        # Fallback if post-treat columns differ; use post-fire min.
+        min_sdyd_val = data["Sdyd post-fire"].min()
     min_sdyd_round = int(min_sdyd_val)
 
-    # Determine max SDDC threshold as the sum of post-fire NTU (or t)
-    max_sddc_val = data['NTU post-fire'].sum()
-    #max_sddc_val = data['Sddc post-fire'].sum()
+    # Use post-fire SDDC maximum to set the upper bound of the search interval.
+    max_sddc_val = data["Sddc post-fire"].max()
     max_sddc_round = int(max_sddc_val) + 1
 
-    # Phase 1: Decrease by step_size until status == 0
-    current_sddc = max_sddc_round
-    hit_infeasible = False
-    while current_sddc > 0:
+    def _status_for_threshold(sddc_thr):
         try:
-            with open(os.devnull, 'w') as devnull:
+            with open(os.devnull, "w") as devnull:
                 with redirect_stdout(devnull), redirect_stderr(devnull):
-                    result = ce_select_sites_2(
+                    result = ce_select_sites_flexible(
                         data=data,
                         treatments=treatments,
                         treatment_cost=treatment_cost,
                         treatment_quantity=treatment_quantity,
                         fixed_cost=fixed_cost,
                         sdyd_threshold=max_sdyd_val,
-                        sddc_threshold=current_sddc,
+                        sddc_threshold=int(sddc_thr),
                         slope_range=None,
                         bs_threshold=None,
                     )
-            status = result[0]
+            if result is None:
+                return None
+            return result[0]
         except Exception:
-            status = None
-        
-        if status == 0:
-            hit_infeasible = True
-            break
-        
-        current_sddc = max(0, current_sddc - step_size)
+            return None
 
-    # Phase 2: Increase by 1 until status == 1 (feasible)
-    lower_bound_sddc = current_sddc
-    while lower_bound_sddc <= max_sddc_round:
-        try:
-            with open(os.devnull, 'w') as devnull:
-                with redirect_stdout(devnull), redirect_stderr(devnull):
-                    result = ce_select_sites_2(
-                        data=data,
-                        treatments=treatments,
-                        treatment_cost=treatment_cost,
-                        treatment_quantity=treatment_quantity,
-                        fixed_cost=fixed_cost,
-                        sdyd_threshold=max_sdyd_val,
-                        sddc_threshold=lower_bound_sddc,
-                        slope_range=None,
-                        bs_threshold=None,
-                    )
-            status = result[0]
-        except Exception:
-            status = None
-        
-        if status == 1:
-            break
-        lower_bound_sddc += 1
+    # We search for the minimum feasible SDDC threshold (status == 1).
+    # Assumption: feasibility is monotonic with SDDC threshold.
+    low, high = 0, max_sddc_round
+    best_feasible = None
 
-    # If never feasible, set lower bound to max
-    if lower_bound_sddc > max_sddc_round:
+    high_status = _status_for_threshold(high)
+    if high_status != 1:
+        # If even the upper bound is not feasible, return the conservative bound.
         lower_bound_sddc = max_sddc_round
-
-    sddc_threshold_range = (lower_bound_sddc, max_sddc_round)
-    sdyd_threshold_range = (min_sdyd_round, max_sdyd_val)
-    return sddc_threshold_range, sdyd_threshold_range
-
-def all_thresholds(data, treatments, treatment_cost, treatment_quantity, fixed_cost, sdyd_threshold, sddc_threshold, sdyd_threshold_range, sddc_threshold_range):
-    
-    from PATH_CE import ce_select_sites_2
-    import numpy as np
-    import pandas as pd
-    import os
-    from contextlib import redirect_stdout, redirect_stderr
-
-    sdyd_range_size = sdyd_threshold_range[1] - sdyd_threshold_range[0]
-    if sdyd_range_size <= 20:
-        sdyd_step_values = np.linspace(sdyd_threshold_range[0], sdyd_threshold_range[1], sdyd_range_size + 1, dtype=int)
-    elif 20<sdyd_range_size<=200:
-        sdyd_step_values = np.linspace(sdyd_threshold_range[0], sdyd_threshold_range[1], 20, dtype=int)
-    elif 200<sdyd_range_size<=2000:
-        sdyd_step_values = np.linspace(sdyd_threshold_range[0], sdyd_threshold_range[1], 50, dtype=int)
     else:
-        sdyd_step_values = np.linspace(sdyd_threshold_range[0], sdyd_threshold_range[1], 75, dtype=int)
+        low_status = _status_for_threshold(low)
+        if low_status == 1:
+            lower_bound_sddc = 0
+        else:
+            while low <= high:
+                mid = (low + high) // 2
+                status = _status_for_threshold(mid)
 
-    # Ensure specified sdyd_threshold is included
-    if sdyd_threshold not in sdyd_step_values:
-        closest_sdyd_idx=np.argmin(np.abs(sdyd_step_values-sdyd_threshold))
-        sdyd_step_values=np.delete(sdyd_step_values, closest_sdyd_idx)
-        sdyd_step_values = np.append(sdyd_step_values, sdyd_threshold)
-        sdyd_step_values = np.sort(sdyd_step_values)
-    else:
-        pass
-        
-    sddc_range_size = sddc_threshold_range[1] - sddc_threshold_range[0]
-    if sddc_range_size <= 20:
-        sddc_step_values = np.linspace(sddc_threshold_range[0], sddc_threshold_range[1], sddc_range_size + 1, dtype=int)
-    elif 20<sddc_range_size<=200:
-        sddc_step_values = np.linspace(sddc_threshold_range[0], sddc_threshold_range[1], 20, dtype=int)
-    elif 200<sddc_range_size<=2000:
-        sddc_step_values = np.linspace(sddc_threshold_range[0], sddc_threshold_range[1], 50, dtype=int)
-    else:
-        sddc_step_values = np.linspace(sddc_threshold_range[0], sddc_threshold_range[1], 75, dtype=int)
-    
-    # Ensure specified sddc_threshold is included
-    if sddc_threshold not in sddc_step_values:
-        closest_sddc_idx=np.argmin(np.abs(sddc_step_values-sddc_threshold))
-        sddc_step_values=np.delete(sddc_step_values, closest_sddc_idx)
-        sddc_step_values = np.append(sddc_step_values, sdyd_threshold)
-        sddc_step_values = np.sort(sddc_step_values)
-    else:
-        pass
+                if status == 1:
+                    best_feasible = mid
+                    high = mid - 1
+                else:
+                    low = mid + 1
+
+            lower_bound_sddc = best_feasible if best_feasible is not None else max_sddc_round
+
+    sddc_threshold_range = (int(lower_bound_sddc), int(max_sddc_round))
+    sdyd_threshold_range = (int(min_sdyd_round), int(max_sdyd_val))
+    return sddc_threshold_range, sdyd_threshold_range, int(lower_bound_sddc), int(max_sdyd_val)
+
+
+# def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity, fixed_cost, step_size=5, tolerance=1e-6):
+#     """
+#     Find conservative SDDC/SDYD ranges where the PRIMARY CE model is feasible
+#     (model_primary_status == 1) under monotonic threshold assumptions.
+
+#     Monotonic behavior used here:
+#     - Larger `sddc_threshold` is easier (requires less SDDC reduction).
+#     - Larger `sdyd_threshold` is easier (requires less SDYD reduction).
+
+#     We therefore compute a lower SDDC feasibility bound at a permissive SDYD,
+#     then compute a lower SDYD feasibility bound at that SDDC bound.
+
+#     Returns:
+#     - sddc_threshold_range: (lower_bound_sddc, max_sddc_threshold)
+#     - sdyd_threshold_range: (min_sdyd_threshold, max_sdyd_threshold)
+#     - sddc_threshold: lower_bound_sddc (minimum feasible SDDC)
+#     - sdyd_threshold: max_sdyd_val (maximum SDYD)
+#     """
+#     sdyd_treatments = []
+#     for i in range(len(treatments)):
+#         sdyd_treatment = "Sdyd post-treat " + treatments[i]
+#         sdyd_treatments.append(sdyd_treatment)
+
+#     max_sdyd_val = int(np.ceil(pd.to_numeric(data["Sdyd post-fire"], errors="coerce").max())) + 1
+#     try:
+#         min_sdyd_val = data[sdyd_treatments].min().min()
+#     except Exception:
+#         min_sdyd_val = data["Sdyd post-fire"].min()
+#     min_sdyd_round = int(min_sdyd_val)
+
+#     max_sddc_val = pd.to_numeric(data["Sddc post-fire"], errors="coerce").max()
+#     max_sddc_round = int(np.ceil(max_sddc_val)) + 1
+
+#     def _status_for_threshold(sddc_thr, sdyd_thr):
+#         try:
+#             with open(os.devnull, "w") as devnull:
+#                 with redirect_stdout(devnull), redirect_stderr(devnull):
+#                     result = ce_select_sites_flexible(
+#                         data=data,
+#                         treatments=treatments,
+#                         treatment_cost=treatment_cost,
+#                         treatment_quantity=treatment_quantity,
+#                         fixed_cost=fixed_cost,
+#                         sdyd_threshold=int(sdyd_thr),
+#                         sddc_threshold=int(sddc_thr),
+#                         slope_range=None,
+#                         bs_threshold=None,
+#                     )
+#             if result is None:
+#                 return None
+#             return result[0]
+#         except Exception:
+#             return None
+
+#     sdyd_anchor = int(min_sdyd_round)
+
+#     low, high = 0, max_sddc_round
+#     best_feasible = None
+
+#     high_status = _status_for_threshold(high, sdyd_anchor)
+#     if high_status != 1:
+#         lower_bound_sddc = max_sddc_round
+#     else:
+#         low_status = _status_for_threshold(low, sdyd_anchor)
+#         if low_status == 1:
+#             lower_bound_sddc = 0
+#         else:
+#             while low <= high:
+#                 mid = (low + high) // 2
+#                 status = _status_for_threshold(mid, sdyd_anchor)
+
+#                 if status == 1:
+#                     best_feasible = mid
+#                     high = mid - 1
+#                 else:
+#                     low = mid + 1
+
+#             lower_bound_sddc = best_feasible if best_feasible is not None else max_sddc_round
+
+#     # Now find minimum feasible SDYD at the computed SDDC lower bound.
+#     # Since larger SDYD is easier, this threshold is monotonic and can be
+#     # located with binary search.
+#     low_sdyd, high_sdyd = int(min_sdyd_round), int(max_sdyd_val)
+#     best_sdyd = None
+
+#     high_sdyd_status = _status_for_threshold(lower_bound_sddc, high_sdyd)
+#     if high_sdyd_status == 1:
+#         while low_sdyd <= high_sdyd:
+#             mid_sdyd = (low_sdyd + high_sdyd) // 2
+#             status = _status_for_threshold(lower_bound_sddc, mid_sdyd)
+#             if status == 1:
+#                 best_sdyd = mid_sdyd
+#                 high_sdyd = mid_sdyd - 1
+#             else:
+#                 low_sdyd = mid_sdyd + 1
+
+#     if best_sdyd is None:
+#         min_opt_sdyd = int(max_sdyd_val)
+#         max_opt_sdyd = int(max_sdyd_val)
+#     else:
+#         min_opt_sdyd = int(best_sdyd)
+#         max_opt_sdyd = int(max_sdyd_val)
+
+#     sddc_threshold_range = (int(lower_bound_sddc), int(max_sddc_round))
+#     sdyd_threshold_range = (int(min_opt_sdyd), int(max_opt_sdyd))
+#     return sddc_threshold_range, sdyd_threshold_range, int(lower_bound_sddc), int(max_sdyd_val)
+
+
+def all_thresholds(
+    data,
+    treatments,
+    treatment_cost,
+    treatment_quantity,
+    fixed_cost,
+    sdyd_threshold_range,
+    sddc_threshold_range,
+    sdyd_threshold,
+    sddc_threshold,
+    return_increase_class=True,
+    slope_range=None,
+    bs_threshold=None,
+    id_col=None,
+    area_col=None,
+    quiet=True,
+):
+    """
+    Sweep sdyd/sddc threshold combinations and run ce_select_sites_flexible for each pair.
+
+    sdyd_threshold/sddc_threshold are required anchor values and are forcibly included
+    in the sampled threshold vectors for visualization consistency.
+    """
+    sdyd_min, sdyd_max = int(sdyd_threshold_range[0]), int(sdyd_threshold_range[1])
+    sddc_min, sddc_max = int(sddc_threshold_range[0]), int(sddc_threshold_range[1])
+    sdyd_threshold = int(sdyd_threshold)
+    sddc_threshold = int(sddc_threshold)
+
+    def _build_steps(lower, upper):
+        span = upper - lower
+        if span <= 20:
+            arr = np.linspace(lower, upper, span + 1, dtype=int)
+        elif span <= 200:
+            arr = np.linspace(lower, upper, 20, dtype=int)
+        elif span <= 2000:
+            arr = np.linspace(lower, upper, 50, dtype=int)
+        else:
+            arr = np.linspace(lower, upper, 75, dtype=int)
+        return np.unique(arr.astype(int))
+
+    sdyd_step_values = _build_steps(sdyd_min, sdyd_max)
+    sddc_step_values = _build_steps(sddc_min, sddc_max)
+    sdyd_step_values = np.unique(np.append(sdyd_step_values, sdyd_threshold).astype(int))
+    sddc_step_values = np.unique(np.append(sddc_step_values, sddc_threshold).astype(int))
 
     results = []
     for sdyd_thr in sdyd_step_values:
         for sddc_thr in sddc_step_values:
             try:
-                with open(os.devnull, 'w') as devnull:
-                    with redirect_stdout(devnull), redirect_stderr(devnull):
-                        status,treatment_cost_vectors, sediment_yield_reduction_thresholds, selected_hillslopes, treatment_hillslopes, total_Sddc_reduction, final_Sddc, hillslopes_sdyd, sdyd_df, untreatable_sdyd, total_cost, total_fixed_cost = ce_select_sites_2(
-                            data,
-                            treatments,
-                            treatment_cost,
-                            treatment_quantity,
-                            fixed_cost,
-                            sdyd_thr,
-                            sddc_thr,
-                            slope_range=(None),
-                            bs_threshold=(None)
-                        )
-                
+                if quiet:
+                    with open(os.devnull, 'w') as devnull:
+                        with redirect_stdout(devnull), redirect_stderr(devnull):
+                            result = ce_select_sites_flexible(
+                                data=data,
+                                treatments=treatments,
+                                treatment_cost=treatment_cost,
+                                treatment_quantity=treatment_quantity,
+                                fixed_cost=fixed_cost,
+                                sdyd_threshold=int(sdyd_thr),
+                                sddc_threshold=int(sddc_thr),
+                                slope_range=slope_range,
+                                bs_threshold=bs_threshold,
+                                id_col=id_col,
+                                area_col=area_col,
+                                return_increase_class=return_increase_class,
+                            )
+                else:
+                    result = ce_select_sites_flexible(
+                        data=data,
+                        treatments=treatments,
+                        treatment_cost=treatment_cost,
+                        treatment_quantity=treatment_quantity,
+                        fixed_cost=fixed_cost,
+                        sdyd_threshold=int(sdyd_thr),
+                        sddc_threshold=int(sddc_thr),
+                        slope_range=slope_range,
+                        bs_threshold=bs_threshold,
+                        id_col=id_col,
+                        area_col=area_col,
+                        return_increase_class=return_increase_class,
+                    )
+
+                if result is None:
+                    results.append({
+                        'sddc_threshold': int(sddc_thr),
+                        'sdyd_threshold': int(sdyd_thr),
+                        'model_primary_status': None,
+                        'selected_hillslopes': None,
+                        'treatment_hillslopes': None,
+                        'total_Sddc_reduction': np.nan,
+                        'final_Sddc': np.nan,
+                        'hillslopes_sdyd': None,
+                        'sdyd_df': None,
+                        'untreatable_sdyd': None,
+                        'total_cost': np.nan,
+                        'total_fixed_cost': np.nan,
+                    })
+                    continue
+
+                (
+                    model_primary_status,
+                    _treatment_cost_vectors,
+                    _sediment_yield_reduction_thresholds,
+                    selected_hillslopes,
+                    treatment_hillslopes,
+                    total_Sddc_reduction,
+                    final_Sddc,
+                    hillslopes_sdyd,
+                    sdyd_df,
+                    untreatable_sdyd,
+                    total_cost,
+                    total_fixed_cost,
+                    untreatable_sdyd_increase,
+                ) = result
+
                 results.append({
-                    'sddc_threshold': sddc_thr,
-                    'sdyd_threshold': sdyd_thr,
+                    'sddc_threshold': int(sddc_thr),
+                    'sdyd_threshold': int(sdyd_thr),
+                    'model_primary_status': model_primary_status,
                     'selected_hillslopes': selected_hillslopes,
                     'treatment_hillslopes': treatment_hillslopes,
                     'total_Sddc_reduction': total_Sddc_reduction,
@@ -171,17 +330,336 @@ def all_thresholds(data, treatments, treatment_cost, treatment_quantity, fixed_c
                     'sdyd_df': sdyd_df,
                     'untreatable_sdyd': untreatable_sdyd,
                     'total_cost': total_cost,
-                    'total_fixed_cost': total_fixed_cost
+                    'total_fixed_cost': total_fixed_cost,
+                    'untreatable_sdyd_increase': untreatable_sdyd_increase,
                 })
+            except KeyboardInterrupt:
+                raise
             except Exception as e:
-                print(f"Error at sdyd: {sdyd_thr}, sddc: {sddc_thr} - {e}")
-    
+                results.append({
+                    'sddc_threshold': int(sddc_thr),
+                    'sdyd_threshold': int(sdyd_thr),
+                    'model_primary_status': None,
+                    'selected_hillslopes': None,
+                    'treatment_hillslopes': None,
+                    'total_Sddc_reduction': np.nan,
+                    'final_Sddc': np.nan,
+                    'hillslopes_sdyd': None,
+                    'sdyd_df': None,
+                    'untreatable_sdyd': None,
+                    'total_cost': np.nan,
+                    'total_fixed_cost': np.nan,
+                    'untreatable_sdyd_increase': None,
+                    'error': repr(e),
+                })
     results_df = pd.DataFrame(results)
     return results_df
 
+
+def _to_int_set(values):
+    """Convert an iterable of mixed values into a set of ints."""
+    if values is None:
+        return set()
+    series = pd.to_numeric(pd.Series(list(values)), errors="coerce").dropna()
+    return set(series.astype(int).tolist())
+
+
+def _parse_id_list(value):
+    """Parse list-like cells used by topaz_ids/topaz_ids_all columns."""
+    if isinstance(value, list):
+        return [int(v) for v in pd.to_numeric(pd.Series(value), errors="coerce").dropna().astype(int).tolist()]
+    if isinstance(value, str):
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, list):
+                return [int(v) for v in pd.to_numeric(pd.Series(parsed), errors="coerce").dropna().astype(int).tolist()]
+        except (ValueError, SyntaxError):
+            return []
+    return []
+
+
+def _first_present(columns, candidates):
+    for col in candidates:
+        if col in columns:
+            return col
+    return None
+
+
+def _extract_result_payload(result):
+    """Read selection outputs from either CE tuple output or a results_df row/dict."""
+    if isinstance(result, tuple) and len(result) >= 12:
+        return {
+            "selected_hillslopes": result[3],
+            "treatment_hillslopes": result[4],
+            "final_Sddc": result[6],
+            "untreatable_sdyd": result[9],
+            "total_cost": result[10],
+            "untreatable_sdyd_increase": result[12] if len(result) >= 13 else None,
+        }
+
+    if isinstance(result, pd.Series):
+        result = result.to_dict()
+
+    if isinstance(result, dict):
+        return {
+            "selected_hillslopes": result.get("selected_hillslopes", []),
+            "treatment_hillslopes": result.get("treatment_hillslopes", []),
+            "final_Sddc": result.get("final_Sddc", np.nan),
+            "untreatable_sdyd": result.get("untreatable_sdyd", None),
+            "total_cost": result.get("total_cost", np.nan),
+            "untreatable_sdyd_increase": result.get("untreatable_sdyd_increase", None),
+        }
+
+    raise TypeError("result must be a CE tuple, pandas Series row, or dict-like payload.")
+
+
+def plot_treatment_selection_map(
+    result,
+    final_data,
+    gdf,
+    gdf_channels=None,
+    treatments=None,
+    title_prefix="",
+    figsize=(10, 10),
+    include_group_borders=True,
+    include_untreatable=True,
+    untreatable_sdyd_increase=None,
+):
+    """Plot selected treatment areas on hillslope polygons across PATH watershed schemas.
+
+    Supports all current watershed data variants by auto-detecting identifier styles:
+    - contrast-based selection: final_data contains contrast_id + topaz_ids(_all)
+    - Topaz-based selection: selected IDs align with TopazID-like columns
+    - Wepp-based selection: selected IDs align with WeppID/wepp_id columns
+    """
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from shapely.geometry import Polygon, MultiPolygon
+
+    payload = _extract_result_payload(result)
+    treatment_hillslopes = payload["treatment_hillslopes"] if payload["treatment_hillslopes"] is not None else []
+    untreatable_sdyd = payload["untreatable_sdyd"]
+    if untreatable_sdyd_increase is None:
+        untreatable_sdyd_increase = payload.get("untreatable_sdyd_increase")
+    total_cost = payload["total_cost"]
+    final_sddc = payload["final_Sddc"]
+
+    if treatments is None:
+        if isinstance(treatment_hillslopes, list) and treatment_hillslopes:
+            treatments = [f"Treatment {i + 1}" for i in range(len(treatment_hillslopes))]
+        else:
+            treatments = []
+
+    final_df = final_data.copy()
+    gdf_plot = gdf.copy()
+
+    topaz_ids_col = _first_present(final_df.columns, ["topaz_ids_all", "topaz_ids"])
+    final_contrast_col = _first_present(final_df.columns, ["contrast_id"])
+    final_topaz_col = _first_present(final_df.columns, ["TopazID", "topaz_id", "Topaz ID"])
+    final_wepp_col = _first_present(final_df.columns, ["wepp_id", "WeppID"])
+
+    gdf_topaz_col = _first_present(gdf_plot.columns, ["TopazID", "topaz_id", "Topaz ID"])
+    gdf_wepp_col = _first_present(gdf_plot.columns, ["WeppID", "wepp_id"])
+    if gdf_topaz_col is None and gdf_wepp_col is None:
+        raise KeyError("gdf must include a TopazID-like or WeppID-like identifier column.")
+
+    gdf_plot["_topaz_id"] = (
+        pd.to_numeric(gdf_plot[gdf_topaz_col], errors="coerce").astype("Int64") if gdf_topaz_col else pd.Series(pd.NA, index=gdf_plot.index, dtype="Int64")
+    )
+    gdf_plot["_wepp_id"] = (
+        pd.to_numeric(gdf_plot[gdf_wepp_col], errors="coerce").astype("Int64") if gdf_wepp_col else pd.Series(pd.NA, index=gdf_plot.index, dtype="Int64")
+    )
+
+    contrast_to_topaz = {}
+    if final_contrast_col is not None and topaz_ids_col is not None:
+        for _, row in final_df[[final_contrast_col, topaz_ids_col]].dropna(subset=[final_contrast_col]).iterrows():
+            cid = int(pd.to_numeric(row[final_contrast_col], errors="coerce"))
+            tids = _parse_id_list(row[topaz_ids_col])
+            if tids:
+                contrast_to_topaz[cid] = tids
+
+    treatment_id_sets = []
+    for i in range(len(treatments)):
+        ids = treatment_hillslopes[i] if i < len(treatment_hillslopes) else []
+        treatment_id_sets.append(_to_int_set(ids))
+
+    all_selected_ids = set().union(*treatment_id_sets) if treatment_id_sets else set()
+    gdf_topaz_ids = _to_int_set(gdf_plot["_topaz_id"].dropna().tolist())
+    gdf_wepp_ids = _to_int_set(gdf_plot["_wepp_id"].dropna().tolist())
+    contrast_ids = set(contrast_to_topaz.keys())
+
+    score_topaz = len(all_selected_ids.intersection(gdf_topaz_ids))
+    score_wepp = len(all_selected_ids.intersection(gdf_wepp_ids))
+    score_contrast = len(all_selected_ids.intersection(contrast_ids))
+
+    if score_contrast > max(score_topaz, score_wepp):
+        id_mode = "contrast"
+    elif score_wepp > score_topaz:
+        id_mode = "wepp"
+    else:
+        id_mode = "topaz"
+
+    def _selected_mask(ids):
+        if not ids:
+            return pd.Series(False, index=gdf_plot.index)
+        if id_mode == "contrast":
+            topaz_ids = set()
+            for cid in ids:
+                topaz_ids.update(contrast_to_topaz.get(int(cid), []))
+            return gdf_plot["_topaz_id"].isin(topaz_ids)
+        if id_mode == "wepp":
+            return gdf_plot["_wepp_id"].isin(ids)
+        return gdf_plot["_topaz_id"].isin(ids)
+
+    gdf_plot["treatment"] = "Untreated"
+    for idx, treatment in enumerate(treatments):
+        mask = _selected_mask(treatment_id_sets[idx])
+        gdf_plot.loc[mask, "treatment"] = treatment
+
+    poly_mask = gdf_plot.geometry.geom_type.isin(["Polygon", "MultiPolygon"])
+    gdf_poly = gdf_plot[poly_mask].copy()
+
+    def _exterior_only(geom):
+        if geom is None or geom.is_empty:
+            return None
+        geom = geom.buffer(0)
+        if geom.geom_type == "Polygon":
+            return Polygon(geom.exterior)
+        if geom.geom_type == "MultiPolygon":
+            return MultiPolygon([Polygon(p.exterior) for p in geom.geoms if not p.is_empty])
+        return None
+
+    all_group_unions = []
+    if include_group_borders and id_mode == "contrast" and contrast_to_topaz:
+        for group_ids in contrast_to_topaz.values():
+            group_geoms = gdf_poly[gdf_poly["_topaz_id"].isin(group_ids)].geometry
+            if not group_geoms.empty:
+                shell = _exterior_only(group_geoms.unary_union)
+                if shell is not None and not shell.is_empty:
+                    all_group_unions.append(shell)
+
+    def _ids_to_unions(raw_ids):
+        unions = []
+        if not raw_ids:
+            return unions
+        if id_mode == "contrast":
+            for rid in raw_ids:
+                group_ids = contrast_to_topaz.get(int(rid), [])
+                group_geoms = gdf_poly[gdf_poly["_topaz_id"].isin(group_ids)].geometry
+                if not group_geoms.empty:
+                    shell = _exterior_only(group_geoms.unary_union)
+                    if shell is not None and not shell.is_empty:
+                        unions.append(shell)
+        elif id_mode == "wepp":
+            group_geoms = gdf_poly[gdf_poly["_wepp_id"].isin(raw_ids)].geometry
+            if not group_geoms.empty:
+                shell = _exterior_only(group_geoms.unary_union)
+                if shell is not None and not shell.is_empty:
+                    unions.append(shell)
+        else:
+            group_geoms = gdf_poly[gdf_poly["_topaz_id"].isin(raw_ids)].geometry
+            if not group_geoms.empty:
+                shell = _exterior_only(group_geoms.unary_union)
+                if shell is not None and not shell.is_empty:
+                    unions.append(shell)
+        return unions
+
+    untreatable_other_unions = []
+    untreatable_increase_unions = []
+    if include_untreatable and untreatable_sdyd is not None and hasattr(untreatable_sdyd, "empty") and not untreatable_sdyd.empty:
+        untreatable_id_col = next((c for c in untreatable_sdyd.columns if c != "final_Sdyd"), None)
+        if untreatable_id_col is not None:
+            untreatable_ids = _to_int_set(untreatable_sdyd[untreatable_id_col].tolist())
+
+            increase_ids = set()
+            if untreatable_sdyd_increase is not None and hasattr(untreatable_sdyd_increase, "empty") and not untreatable_sdyd_increase.empty:
+                increase_id_col = next((c for c in untreatable_sdyd_increase.columns if c != "final_Sdyd"), untreatable_id_col)
+                if increase_id_col in untreatable_sdyd_increase.columns:
+                    increase_ids = _to_int_set(untreatable_sdyd_increase[increase_id_col].tolist())
+            else:
+                # Fallback classification from final_data when explicit increase class is unavailable.
+                treat_cols = [f"Sdyd post-treat {t}" for t in treatments if f"Sdyd post-treat {t}" in final_df.columns]
+                if treat_cols and "Sdyd post-fire" in final_df.columns:
+                    id_col_for_increase = None
+                    if id_mode == "contrast":
+                        id_col_for_increase = final_contrast_col
+                    elif id_mode == "wepp":
+                        id_col_for_increase = final_wepp_col
+                    else:
+                        id_col_for_increase = final_topaz_col
+
+                    if id_col_for_increase in final_df.columns:
+                        inc_df = final_df[[id_col_for_increase, "Sdyd post-fire"] + treat_cols].copy()
+                        inc_df["Sdyd post-fire"] = pd.to_numeric(inc_df["Sdyd post-fire"], errors="coerce")
+                        for col in treat_cols:
+                            inc_df[col] = pd.to_numeric(inc_df[col], errors="coerce")
+                        inc_mask = inc_df[treat_cols].gt(inc_df["Sdyd post-fire"], axis=0).all(axis=1)
+                        increase_ids = _to_int_set(inc_df.loc[inc_mask, id_col_for_increase].tolist())
+
+            increase_untreatable_ids = untreatable_ids.intersection(increase_ids)
+            other_untreatable_ids = untreatable_ids.difference(increase_untreatable_ids)
+
+            untreatable_increase_unions = _ids_to_unions(increase_untreatable_ids)
+            untreatable_other_unions = _ids_to_unions(other_untreatable_ids)
+
+    palette = ["#c9ebac", "#57af51", "#066106", "#1f7a8c", "#ffb703", "#9c6644"]
+    color_map = {t: palette[i % len(palette)] for i, t in enumerate(treatments)}
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    for treatment_val, color in [("Untreated", "#f5f5f5")] + [(t, color_map[t]) for t in treatments]:
+        layer = gdf_poly[gdf_poly["treatment"] == treatment_val]
+        if not layer.empty:
+            layer.plot(ax=ax, color=color, edgecolor="#888888", linewidth=0.5, alpha=1.0, zorder=1)
+
+    if all_group_unions:
+        all_groups_gdf = gpd.GeoDataFrame(geometry=all_group_unions, crs=gdf_poly.crs)
+        all_groups_gdf.boundary.plot(ax=ax, color="#555555", linewidth=1.0, zorder=3)
+
+    if untreatable_other_unions:
+        untreatable_other_gdf = gpd.GeoDataFrame(geometry=untreatable_other_unions, crs=gdf_poly.crs)
+        untreatable_other_gdf.boundary.plot(ax=ax, color="#ffd60a", linewidth=2.0, zorder=4)
+
+    if untreatable_increase_unions:
+        untreatable_inc_gdf = gpd.GeoDataFrame(geometry=untreatable_increase_unions, crs=gdf_poly.crs)
+        untreatable_inc_gdf.boundary.plot(ax=ax, color="red", linewidth=2.2, zorder=5)
+
+    if gdf_channels is not None and not gdf_channels.empty:
+        gdf_channels.plot(ax=ax, color="#2f86c7", linewidth=1.4, alpha=1.0, zorder=6)
+
+    legend_patches = [mpatches.Patch(facecolor="#f5f5f5", edgecolor="#888888", label="Untreated")]
+    for t in treatments:
+        legend_patches.append(mpatches.Patch(facecolor=color_map[t], edgecolor="#888888", label=f"Mulch: {t}"))
+    if all_group_unions:
+        legend_patches.append(mpatches.Patch(facecolor="none", edgecolor="#555555", linewidth=1.5, label="Hillslope Group Border"))
+    if untreatable_other_unions:
+        legend_patches.append(mpatches.Patch(facecolor="none", edgecolor="#ffd60a", linewidth=2.0, label="Sdyd Threshold Not Met"))
+    if untreatable_increase_unions:
+        legend_patches.append(mpatches.Patch(facecolor="none", edgecolor="red", linewidth=2.2, label="Increase in Sdyd"))
+
+    ax.legend(handles=legend_patches, loc="lower right", fontsize=10)
+
+    title_parts = [title_prefix.strip()] if title_prefix else []
+    if pd.notna(total_cost) and pd.notna(final_sddc):
+        title_parts.append(f"Total Cost: ${float(total_cost):,.2f}   Final Sddc: {float(final_sddc):,.2f} tons")
+    elif pd.notna(total_cost):
+        title_parts.append(f"Total Cost: ${float(total_cost):,.2f}")
+    elif pd.notna(final_sddc):
+        title_parts.append(f"Final Sddc: {float(final_sddc):,.2f} tons")
+
+    ax.set_title("\n".join(title_parts) if title_parts else "Treatment Selection Map", fontsize=12)
+    plt.tight_layout()
+    plt.show()
+
+    return fig, ax
+
+
 def plot_sddc_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=None, figsize=(10, 6)):
     """
-    Plot Outlet Sediment Discharge threshold vs total cost from results_df for a fixed Hillslope Sediment Yield threshold.
+    Plot Sddc threshold vs total cost from results_df for a fixed Sdyd threshold.
 
     Parameters
     - results_df: DataFrame with columns ['sddc_threshold','sdyd_threshold','total_cost']
@@ -212,14 +690,10 @@ def plot_sddc_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=Non
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
 
-    ax.plot(x, y_plot, linestyle='-', color='C0', label=f'Hillslope Sediment Yield threshold = {sdyd_threshold}')
-    ax.set_xlabel('Outlet Sediment Discharge Threshold (tons)')
+    ax.plot(x, y_plot, linestyle='-', color='C0', label=f'Sdyd = {sdyd_threshold}')
+    ax.set_xlabel('Sddc Threshold (t)')
     ax.set_ylabel(ylabel)
-    ax.set_title(
-        f'Total Cost vs Outlet Sediment Discharge Threshold '
-        f'(Hillslope Sediment Yield threshold (tons/acre) = {sdyd_threshold})',
-        fontsize=11,
-    )
+    ax.set_title(f'Total Cost vs Sediment Discharge Threshold (Sdyd threshold (t/ac) = {sdyd_threshold})', fontsize=11)
     ax.grid(True, linestyle=':', alpha=0.6)
 
     #Indicate the location of the specified sdyd_threshold with arrow and dot
@@ -241,9 +715,10 @@ def plot_sddc_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=Non
     
     return ax
 
+
 def plot_sdyd_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=None, figsize=(10, 6)):
     """
-    Plot Hillslope Sediment Yield threshold vs total cost from results_df for a fixed Outlet Sediment Discharge threshold.
+    Plot Sdyd threshold vs total cost from results_df for a fixed Sddc threshold.
 
     Parameters
     - results_df: DataFrame with columns ['sddc_threshold','sdyd_threshold','total_cost']
@@ -280,14 +755,10 @@ def plot_sdyd_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=Non
         fig, ax = plt.subplots(figsize=figsize)
 
 
-    ax.plot(x, y_plot, linestyle='-', color='C0', label=f'Outlet Sediment Discharge threshold = {sddc_threshold}')
-    ax.set_xlabel('Hillslope Sediment Yield Threshold (tons/acre)')
+    ax.plot(x, y_plot, linestyle='-', color='C0', label=f'Sddc = {sddc_threshold}')
+    ax.set_xlabel('Sdyd Threshold (t/ac)')
     ax.set_ylabel(ylabel)
-    ax.set_title(
-        f'Total Cost vs Hillslope Sediment Yield Threshold '
-        f'(Outlet Sediment Discharge threshold (tons) = {sddc_threshold})',
-        fontsize=11,
-    )
+    ax.set_title(f'Total Cost vs Sediment Yield Threshold (Sddc threshold (t) = {sddc_threshold})', fontsize=11)
     ax.grid(True, linestyle=':', alpha=0.6)
     
     # Indicate the location of the specified sdyd_threshold with arrow and dot
@@ -310,830 +781,3 @@ def plot_sdyd_vs_cost(results_df, sdyd_threshold=200, sddc_threshold=200, ax=Non
         #plt.show()
 
     return ax
-
-def create_jupyter_widgets_interactive_map(final_results, gdf, gdf_channels=None,
-                                          initial_sdyd=200, initial_sddc=200,
-                                          width=1200, height=700):
-    """
-    Create an interactive map with Jupyter widgets (ipywidgets) and Plotly.
-    This provides smooth, real-time slider interactions within Jupyter notebooks.
-    
-    Parameters:
-    - final_results: DataFrame with optimization results
-    - gdf: GeoDataFrame for hillslope mapping with 'WeppID' column
-    - gdf_channels: GeoDataFrame for channel mapping (optional)
-    - initial_sdyd, initial_sddc: Initial threshold values
-    - width, height: Figure dimensions
-    
-    Returns:
-    - Interactive widget with map and controls
-    """
-    import ipywidgets as widgets
-    from IPython.display import display, clear_output
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    import ast
-    import pandas as pd
-    import numpy as np
-    
-    print("Creating interactive Jupyter widgets map...")
-    
-    # Get unique threshold values
-    sdyd_values = sorted(final_results['sdyd_threshold'].unique())
-    sddc_values = sorted(final_results['sddc_threshold'].unique())
-    
-    print(f"SDYD range: {min(sdyd_values)} - {max(sdyd_values)} ({len(sdyd_values)} values)")
-    print(f"SDDC range: {min(sddc_values)} - {max(sddc_values)} ({len(sddc_values)} values)")
-    
-    # Pre-process geometries for fast access
-    hillslope_coords = {}
-    for idx, row in gdf.iterrows():
-        try:
-            if hasattr(row.geometry, 'exterior'):
-                coords = list(row.geometry.exterior.coords)
-                if coords:
-                    x_coords, y_coords = zip(*coords)
-                    hillslope_coords[row['WeppID']] = (list(x_coords), list(y_coords))
-        except:
-            continue
-    
-    print(f"Processed {len(hillslope_coords)} hillslope geometries")
-    
-    # Process channel geometries
-    channel_x, channel_y = [], []
-    if gdf_channels is not None and not gdf_channels.empty:
-        for _, row in gdf_channels.iterrows():
-            try:
-                geom = row.geometry
-                coords = []
-                if geom.geom_type == 'LineString':
-                    coords = list(geom.coords)
-                elif geom.geom_type == 'MultiLineString':
-                    for line in geom.geoms:
-                        coords.extend(list(line.coords))
-                        coords.append((None, None))
-                
-                if coords:
-                    x_vals, y_vals = zip(*coords)
-                    channel_x.extend(x_vals)
-                    channel_y.extend(y_vals)
-                    channel_x.append(None)
-                    channel_y.append(None)
-            except:
-                continue
-    
-    # Pre-process all threshold combinations with correct treatment mapping
-    threshold_data = {}
-    for _, row in final_results.iterrows():
-        sdyd_thr = int(row['sdyd_threshold'])
-        sddc_thr = int(row['sddc_threshold'])
-        key = (sdyd_thr, sddc_thr)
-        
-        # Parse treatment data
-        treatment_hillslopes_raw = row['treatment_hillslopes']
-        selected_hillslopes = row['selected_hillslopes']
-        
-        if isinstance(treatment_hillslopes_raw, str):
-            try:
-                treatment_hillslopes = ast.literal_eval(treatment_hillslopes_raw)
-            except:
-                treatment_hillslopes = [[], [], []]
-        else:
-            treatment_hillslopes = treatment_hillslopes_raw if treatment_hillslopes_raw else [[], [], []]
-            
-        if isinstance(selected_hillslopes, str):
-            try:
-                selected_hillslopes = ast.literal_eval(selected_hillslopes)
-            except:
-                selected_hillslopes = []
-        
-        # Ensure proper structure
-        if not isinstance(treatment_hillslopes, list) or len(treatment_hillslopes) < 3:
-            treatment_hillslopes = [[], [], []]
-            
-        # Get treatment sets - map to correct tons/acre values
-        treat_05_tons = set(treatment_hillslopes[0] if isinstance(treatment_hillslopes[0], list) else [])  # 0.5 tons/acre
-        treat_10_tons = set(treatment_hillslopes[1] if isinstance(treatment_hillslopes[1], list) else [])  # 1.0 tons/acre
-        treat_20_tons = set(treatment_hillslopes[2] if isinstance(treatment_hillslopes[2], list) else [])  # 2.0 tons/acre
-        selected_ids = set(selected_hillslopes)
-        all_wepp_ids = set(hillslope_coords.keys())
-        does_not_meet_threshold = all_wepp_ids - selected_ids
-        
-        threshold_data[key] = {
-            'treat_05_tons': treat_05_tons,
-            'treat_10_tons': treat_10_tons,
-            'treat_20_tons': treat_20_tons,
-            'does_not_meet': does_not_meet_threshold,
-            'total_cost': float(row['total_cost']),
-            'final_sddc': float(row['final_Sddc'])
-        }
-    
-    print(f"Pre-processed {len(threshold_data)} threshold combinations")
-    
-    # Create output widget for the plot
-    output = widgets.Output()
-    
-    # Create sliders
-    sdyd_slider = widgets.IntSlider(
-        value=initial_sdyd,
-        min=min(sdyd_values),
-        max=max(sdyd_values),
-        step=sdyd_values[1] - sdyd_values[0] if len(sdyd_values) > 1 else 5,
-        description='SDYD Threshold:',
-        style={'description_width': 'initial'},
-        layout=widgets.Layout(width='400px')
-    )
-    
-    sddc_slider = widgets.IntSlider(
-        value=initial_sddc,
-        min=min(sddc_values),
-        max=max(sddc_values),
-        step=sddc_values[1] - sddc_values[0] if len(sddc_values) > 1 else 5,
-        description='SDDC Threshold:',
-        style={'description_width': 'initial'},
-        layout=widgets.Layout(width='400px')
-    )
-    
-    # Create info display widgets
-    cost_label = widgets.HTML(value="<b>Total Cost:</b> $0")
-    sddc_label = widgets.HTML(value="<b>Final SDDC:</b> 0.0")
-    
-    # Treatment count widgets with correct colors and labels
-    treat_20_count = widgets.HTML(value="<span style='color: #0d5016;'>●</span> 2.0 tons/acre: 0")
-    treat_10_count = widgets.HTML(value="<span style='color: #2d7a32;'>●</span> 1.0 tons/acre: 0") 
-    treat_05_count = widgets.HTML(value="<span style='color: #66bb6a;'>●</span> 0.5 tons/acre: 0")
-    does_not_meet_count = widgets.HTML(value="<span style='color: red;'>⬜</span> Does not meet SDYD threshold: 0")
-    
-    def build_group_coords(wepp_ids, color, name):
-        """Build coordinate arrays for a group of hillslopes"""
-        if not wepp_ids:
-            return go.Scatter(x=[], y=[], mode='lines', line=dict(color='black', width=1), 
-                            fill='toself', fillcolor=color, name=name, showlegend=True,
-                            hovertemplate=f'<b>{name}</b><extra></extra>')
-        
-        all_x, all_y = [], []
-        for wepp_id in wepp_ids:
-            if wepp_id in hillslope_coords:
-                x_coords, y_coords = hillslope_coords[wepp_id]
-                all_x.extend(x_coords)
-                all_y.extend(y_coords)
-                all_x.append(None)
-                all_y.append(None)
-        
-        # For "does not meet threshold", use white fill with red outline
-        if name == "Does not meet SDYD threshold":
-            line_color = 'red'
-            line_width = 2
-        else:
-            line_color = 'black'
-            line_width = 0.5
-        
-        return go.Scatter(
-            x=all_x, y=all_y, mode='lines', line=dict(color=line_color, width=line_width),
-            fill='toself', fillcolor=color, name=name, showlegend=True,
-            opacity=0.8,
-            hovertemplate=f'<b>{name}</b><br>Count: {len(wepp_ids)}<extra></extra>'
-        )
-    
-    def update_plot(change=None):
-        """Update the plot when sliders change"""
-        with output:
-            clear_output(wait=True)
-            
-            # Get current threshold values
-            sdyd_val = sdyd_slider.value
-            sddc_val = sddc_slider.value
-            key = (sdyd_val, sddc_val)
-            
-            # Get data for current thresholds
-            current_data = threshold_data.get(key, {})
-            
-            if not current_data:
-                print(f"Warning: No data for SDYD={sdyd_val}, SDDC={sddc_val}")
-            
-            # Update info displays
-            cost_label.value = f"<b>Total Cost:</b> ${current_data.get('total_cost', 0):,.0f}"
-            sddc_label.value = f"<b>Final SDDC:</b> {current_data.get('final_sddc', 0):.1f}"
-            
-            # Update treatment counts with correct colors and labels
-            treat_20_count.value = f"<span style='color: #0d5016; font-size: 16px;'>●</span> 2.0 tons/acre: {len(current_data.get('treat_20_tons', []))}"
-            treat_10_count.value = f"<span style='color: #2d7a32; font-size: 16px;'>●</span> 1.0 tons/acre: {len(current_data.get('treat_10_tons', []))}"
-            treat_05_count.value = f"<span style='color: #66bb6a; font-size: 16px;'>●</span> 0.5 tons/acre: {len(current_data.get('treat_05_tons', []))}"
-            does_not_meet_count.value = f"<span style='color: red; font-size: 16px;'>⬜</span> Does not meet SDYD threshold: {len(current_data.get('does_not_meet', []))}"
-            
-            # Create figure
-            fig = go.Figure()
-            
-            # Add hillslope traces with correct colors (shades of green)
-            if current_data:
-                # Add in order from lightest to darkest, with "does not meet" first
-                fig.add_trace(build_group_coords(current_data.get('does_not_meet', []), 'white', 'Does not meet SDYD threshold'))
-                fig.add_trace(build_group_coords(current_data.get('treat_05_tons', []), '#66bb6a', '0.5 tons/acre'))
-                fig.add_trace(build_group_coords(current_data.get('treat_10_tons', []), '#2d7a32', '1.0 tons/acre'))
-                fig.add_trace(build_group_coords(current_data.get('treat_20_tons', []), '#0d5016', '2.0 tons/acre'))
-            
-            # Add channels
-            if channel_x and channel_y:
-                fig.add_trace(go.Scatter(
-                    x=channel_x, y=channel_y, mode='lines',
-                    line=dict(color='blue', width=2),
-                    name='Stream Channels', showlegend=True,
-                    hovertemplate='<b>Stream Channel</b><extra></extra>'
-                ))
-            
-            # Update layout
-            fig.update_layout(
-                title=f"PATH Optimization Results - SDYD: {sdyd_val}, SDDC: {sddc_val}",
-                width=width, height=height,
-                xaxis=dict(title="Longitude", scaleanchor="y", scaleratio=1),
-                yaxis=dict(title="Latitude"),
-                showlegend=True,
-                legend=dict(x=0.01, y=0.99, bgcolor='rgba(255,255,255,0.8)'),
-                margin=dict(l=50, r=50, t=80, b=50),
-                plot_bgcolor='lightblue'
-            )
-            
-            fig.show()
-    
-    # Connect sliders to update function
-    sdyd_slider.observe(update_plot, names='value')
-    sddc_slider.observe(update_plot, names='value')
-    
-    # Create layout
-    controls = widgets.VBox([
-        widgets.HTML("<h3>🎛️ Threshold Controls</h3>"),
-        sdyd_slider,
-        sddc_slider,
-        widgets.HTML("<br><h4>📊 Results</h4>"),
-        widgets.HBox([cost_label, sddc_label]),
-        widgets.HTML("<br><h4>🗺️ Treatment Summary</h4>"),
-        widgets.VBox([treat_20_count, treat_10_count, treat_05_count, 
-                     does_not_meet_count])
-    ])
-    
-    # Create main widget
-    main_widget = widgets.HBox([
-        controls,
-        output
-    ], layout=widgets.Layout(border='2px solid #ddd', padding='10px'))
-    
-    # Initial plot
-    update_plot()
-    
-    print("✓ Interactive Jupyter widgets map created!")
-    print("Use the sliders to explore different threshold scenarios.")
-    
-    return main_widget
-
-def create_jupyter_widgets_fast_map(final_results, gdf, gdf_channels=None,
-                                   initial_sdyd=200, initial_sddc=200):
-    """
-    Create a fast, lightweight interactive map using Jupyter widgets and matplotlib.
-    This version prioritizes speed and responsiveness over visual complexity.
-    
-    Parameters:
-    - final_results: DataFrame with optimization results
-    - gdf: GeoDataFrame for hillslope mapping with 'WeppID' column
-    - gdf_channels: GeoDataFrame for channel mapping (optional)
-    - initial_sdyd, initial_sddc: Initial threshold values
-    
-    Returns:
-    - Interactive widget with map and controls
-    """
-    import ipywidgets as widgets
-    import matplotlib.pyplot as plt
-    from IPython.display import display, clear_output
-    import ast
-    import pandas as pd
-    import numpy as np
-    
-    print("Creating fast Jupyter widgets map with matplotlib...")
-    
-    # Get exact threshold values from the data
-    sdyd_values = sorted(final_results['sdyd_threshold'].unique())
-    sddc_values = sorted(final_results['sddc_threshold'].unique())
-    
-    print(f"Available thresholds: SDYD {len(sdyd_values)} values ({min(sdyd_values)}-{max(sdyd_values)})")
-    print(f"                     SDDC {len(sddc_values)} values ({min(sddc_values)}-{max(sddc_values)})")
-    
-    # Pre-process threshold data with exact matching
-    threshold_data = {}
-    for _, row in final_results.iterrows():
-        sdyd_thr = row['sdyd_threshold']  # Keep as original type
-        sddc_thr = row['sddc_threshold']  # Keep as original type
-        key = (sdyd_thr, sddc_thr)
-        
-        # Parse treatment data
-        treatment_hillslopes_raw = row['treatment_hillslopes']
-        selected_hillslopes = row['selected_hillslopes']
-        untreatable_sdyd = row['untreatable_sdyd']
-        
-        if isinstance(treatment_hillslopes_raw, str):
-            try:
-                treatment_hillslopes = ast.literal_eval(treatment_hillslopes_raw)
-            except:
-                treatment_hillslopes = [[], [], []]
-        else:
-            treatment_hillslopes = treatment_hillslopes_raw if treatment_hillslopes_raw else [[], [], []]
-            
-        if isinstance(selected_hillslopes, str):
-            try:
-                selected_hillslopes = ast.literal_eval(selected_hillslopes)
-            except:
-                selected_hillslopes = []
-          # Handle untreatable_sdyd - this contains hillslopes that exceed SDYD threshold
-        if pd.isna(untreatable_sdyd) or str(untreatable_sdyd).strip() in ['nan', '', 'None']:
-            untreatable_ids = []
-        elif isinstance(untreatable_sdyd, str):
-            try:
-                # Handle DataFrame string representation
-                clean_str = str(untreatable_sdyd).strip()
-                
-                # Look for DataFrame-like content
-                if 'wepp_id' in clean_str and 'final_Sdyd' in clean_str:
-                    # Extract wepp_id values using regex
-                    import re
-                    # Look for patterns like "1     77.7193" or "  1     77.7193"
-                    pattern = r'^\s*(\d+)\s+[\d\.]+.*$'
-                    wepp_ids = []
-                    
-                    for line in clean_str.split('\n'):
-                        match = re.match(pattern, line)
-                        if match:
-                            wepp_ids.append(int(match.group(1)))
-                    
-                    untreatable_ids = wepp_ids
-                else:
-                    # Try to parse as a simple list or other format
-                    try:
-                        parsed = ast.literal_eval(untreatable_sdyd)
-                        if isinstance(parsed, list):
-                            untreatable_ids = parsed
-                        else:
-                            untreatable_ids = []
-                    except:
-                        untreatable_ids = []
-            except Exception as e:
-                print(f"Warning: Could not parse untreatable data: {e}")
-                untreatable_ids = []
-        elif hasattr(untreatable_sdyd, 'empty') and not untreatable_sdyd.empty:
-            untreatable_ids = untreatable_sdyd['wepp_id'].tolist() if 'wepp_id' in untreatable_sdyd.columns else []
-        elif isinstance(untreatable_sdyd, list):
-            untreatable_ids = untreatable_sdyd
-        else:
-            untreatable_ids = []
-        
-        if not isinstance(treatment_hillslopes, list) or len(treatment_hillslopes) < 3:
-            treatment_hillslopes = [[], [], []]
-              # Get treatment sets - these correspond to 0.5, 1.0, and 2.0 tons/acre
-        treat_05_ids = set(treatment_hillslopes[0] if isinstance(treatment_hillslopes[0], list) else [])
-        treat_10_ids = set(treatment_hillslopes[1] if isinstance(treatment_hillslopes[1], list) else [])
-        treat_20_ids = set(treatment_hillslopes[2] if isinstance(treatment_hillslopes[2], list) else [])
-        untreatable_ids_set = set(untreatable_ids)
-        selected_ids = set(selected_hillslopes)
-        all_wepp_ids = set(gdf['WeppID'].values)
-        not_selected_ids = all_wepp_ids - selected_ids
-        
-        # Hillslopes that don't meet SDYD threshold = all hillslopes not in selected_hillslopes
-        # These should get red outline as "Does not meet SDYD threshold"
-        
-        threshold_data[key] = {
-            'treat_05': treat_05_ids,      # 0.5 tons/acre
-            'treat_10': treat_10_ids,      # 1.0 tons/acre 
-            'treat_20': treat_20_ids,      # 2.0 tons/acre
-            'untreatable': untreatable_ids_set,  # Untreatable (exceed SDYD limit) - red outline
-            'no_treatment': not_selected_ids,  # Not selected for treatment
-            'total_cost': float(row['total_cost']),
-            'final_sddc': float(row['final_Sddc'])
-        }
-    
-    print(f"Processed {len(threshold_data)} threshold combinations")
-    
-    # Create matplotlib-based interactive function
-    def interactive_plot(sdyd_threshold, sddc_threshold):
-        """Create matplotlib plot for given thresholds"""
-        key = (sdyd_threshold, sddc_threshold)
-        current_data = threshold_data.get(key, {})
-        
-        if not current_data:
-            print(f"Warning: No exact match for SDYD={sdyd_threshold}, SDDC={sddc_threshold}")
-            return
-        
-        # Create figure with no axes labels
-        fig, ax = plt.subplots(1, 1, figsize=(14, 10))
-        
-        # Define correct colors - shades of green plus white and red outline
-        colors = {
-            'treat_20': '#0d5016',    # Dark green - 2.0 tons/acre
-            'treat_10': '#2d7a32',    # Medium green - 1.0 tons/acre
-            'treat_05': '#66bb6a',    # Light green - 0.5 tons/acre
-            'no_treatment': 'white',  # White - not selected
-            'untreatable': 'white'    # White with red outline - doesn't meet SDYD threshold
-        }
-          # Count hillslopes for legend
-        counts = {
-            'treat_20': len(current_data.get('treat_20', [])),
-            'treat_10': len(current_data.get('treat_10', [])),
-            'treat_05': len(current_data.get('treat_05', [])),
-            'untreatable': len(current_data.get('untreatable', [])),
-            'no_treatment': len(current_data.get('no_treatment', []))
-        }
-        
-        print(f"Treatment counts: 2.0={counts['treat_20']}, 1.0={counts['treat_10']}, 0.5={counts['treat_05']}, untreatable={counts['untreatable']}, no_treatment={counts['no_treatment']}")
-          # Plot hillslopes by treatment type
-        for _, row in gdf.iterrows():
-            wepp_id = row['WeppID']
-            
-            if wepp_id in current_data.get('treat_20', set()):
-                fill_color = colors['treat_20']
-                edge_color = 'black'
-                edge_width = 1
-                treatment = '2.0 tons/acre'
-            elif wepp_id in current_data.get('treat_10', set()):
-                fill_color = colors['treat_10']
-                edge_color = 'black'
-                edge_width = 1
-                treatment = '1.0 tons/acre'
-            elif wepp_id in current_data.get('treat_05', set()):
-                fill_color = colors['treat_05']
-                edge_color = 'black'
-                edge_width = 1
-                treatment = '0.5 tons/acre'
-            elif wepp_id in current_data.get('untreatable', set()):
-                fill_color = 'lightgray'  # Light gray for untreatable
-                edge_color = 'red'  # Red outline for untreatable (exceeds SDYD limit)
-                edge_width = 2
-                treatment = 'Does not meet SDYD threshold'
-            elif wepp_id in current_data.get('no_treatment', set()):
-                fill_color = 'lightgray'  # Light gray for hillslopes that don't meet threshold
-                edge_color = 'black'  # Red outline for hillslopes that don't meet SDYD threshold
-                edge_width = 1
-                treatment = 'Untreated'
-            else:
-                fill_color = 'lightgray'
-                edge_color = 'black'
-                edge_width = 1
-                treatment = 'Other'
-            
-            # Plot the hillslope
-            if hasattr(row.geometry, 'exterior'):
-                x, y = row.geometry.exterior.xy
-                ax.fill(x, y, color=fill_color, edgecolor=edge_color, linewidth=edge_width, alpha=0.8)
-        
-        # Add channels if provided
-        if gdf_channels is not None and not gdf_channels.empty:
-            for _, row in gdf_channels.iterrows():
-                if row.geometry.geom_type == 'LineString':
-                    x, y = row.geometry.xy
-                    ax.plot(x, y, color='blue', linewidth=2, alpha=0.8)
-                elif row.geometry.geom_type == 'MultiLineString':
-                    for line in row.geometry.geoms:
-                        x, y = line.xy
-                        ax.plot(x, y, color='blue', linewidth=2, alpha=0.8)
-        
-        # Customize plot - remove axes and labels as requested
-        ax.set_aspect('equal')
-        ax.set_title(f'PATH Optimization Results\\n' +
-                    f'SDYD Threshold: {sdyd_threshold} | SDDC Threshold: {sddc_threshold}\\n' +
-                    f'Total Cost: ${current_data.get("total_cost", 0):,.0f} | ' +
-                    f'Final SDDC: {current_data.get("final_sddc", 0):.1f}', fontsize=14)
-        
-        # Remove longitude/latitude axes as requested
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_xlabel('')
-        ax.set_ylabel('')
-          # Create custom legend with correct labels and colors
-        legend_elements = [
-            plt.Rectangle((0,0),1,1, facecolor=colors['treat_20'], edgecolor='black', 
-                         label=f'2.0 tons/acre ({counts["treat_20"]})'),
-            plt.Rectangle((0,0),1,1, facecolor=colors['treat_10'], edgecolor='black', 
-                         label=f'1.0 tons/acre ({counts["treat_10"]})'),
-            plt.Rectangle((0,0),1,1, facecolor=colors['treat_05'], edgecolor='black', 
-                         label=f'0.5 tons/acre ({counts["treat_05"]})'),
-            plt.Rectangle((0,0),1,1, facecolor='lightgray', edgecolor='red', linewidth=1,
-                         label=f'Does not meet SDYD threshold ({counts["untreatable"]})'),
-            plt.Rectangle((0,0),1,1, facecolor='lightgray', edgecolor='black', linewidth=2,
-                         label=f'Untreated ({counts["no_treatment"]})')
-        ]
-        
-        if gdf_channels is not None and not gdf_channels.empty:
-            legend_elements.append(plt.Line2D([0], [0], color='blue', linewidth=2, label='Stream Channels'))
-        
-        ax.legend(handles=legend_elements, loc='upper right', framealpha=0.9, fontsize=10)
-        
-        plt.tight_layout()
-        plt.show()
-    
-    # Find closest initial values if exact match doesn't exist
-    # def find_closest_value(target, values_list):
-    #     return min(values_list, key=lambda x: abs(x - target))
-    
-    # closest_sdyd = find_closest_value(initial_sdyd, sdyd_values)
-    # closest_sddc = find_closest_value(initial_sddc, sddc_values)
-    
-    # use a SelectionSlider (discrete values from a list) instead of an IntSlider with a step
-    closest_sdyd = min(sdyd_values, key=lambda x: abs(x - initial_sdyd))
-    closest_sddc = min(sddc_values, key=lambda x: abs(x - initial_sddc))
-
-    interactive_widget = widgets.interact(
-        interactive_plot,
-        sdyd_threshold=widgets.SelectionSlider(
-            options=sdyd_values,
-            value=closest_sdyd,
-            description='SDYD Threshold:',
-            style={'description_width': 'initial'},
-            layout=widgets.Layout(width='500px')
-        ),
-        sddc_threshold=widgets.SelectionSlider(
-            options=sddc_values,
-            value=closest_sddc,
-            description='SDDC Threshold:',
-            style={'description_width': 'initial'},
-            layout=widgets.Layout(width='500px')
-        )
-    )
-    
-    print("✓ Fast matplotlib-based interactive map created!")
-    print("Use the dropdown menus to explore threshold scenarios with exact value matching.")
-    
-    return interactive_widget
-
-
-def create_plotly_map_for_quarto(final_results, gdf, gdf_channels=None,
-                                  initial_sdyd=200, initial_sddc=200,
-                                  width=1200, height=800):
-    """
-    Create an interactive Plotly map with sliders that works in Quarto HTML output.
-    Uses Plotly's native slider functionality instead of ipywidgets.
-    
-    Parameters:
-    - final_results: DataFrame with optimization results
-    - gdf: GeoDataFrame for hillslope mapping with 'WeppID' column
-    - gdf_channels: GeoDataFrame for channel mapping (optional)
-    - initial_sdyd, initial_sddc: Initial threshold values
-    - width, height: Figure dimensions
-    
-    Returns:
-    - Plotly figure object that renders in Quarto
-    """
-    import plotly.graph_objects as go
-    import ast
-    import pandas as pd
-    import numpy as np
-    
-    print("Creating Plotly map for Quarto...")
-    
-    # Get unique threshold values
-    sdyd_values = sorted(final_results['sdyd_threshold'].unique())
-    sddc_values = sorted(final_results['sddc_threshold'].unique())
-    
-    print(f"SDYD range: {min(sdyd_values)} - {max(sdyd_values)} ({len(sdyd_values)} values)")
-    print(f"SDDC range: {min(sddc_values)} - {max(sddc_values)} ({len(sddc_values)} values)")
-    
-    # Pre-process geometries
-    hillslope_coords = {}
-    for idx, row in gdf.iterrows():
-        try:
-            if hasattr(row.geometry, 'exterior'):
-                coords = list(row.geometry.exterior.coords)
-                if coords:
-                    x_coords, y_coords = zip(*coords)
-                    hillslope_coords[row['WeppID']] = (list(x_coords), list(y_coords))
-        except:
-            continue
-    
-    # Pre-process channel geometries
-    channel_coords = []
-    if gdf_channels is not None:
-        for idx, row in gdf_channels.iterrows():
-            try:
-                if hasattr(row.geometry, 'coords'):
-                    coords = list(row.geometry.coords)
-                    if coords:
-                        x_coords, y_coords = zip(*coords)
-                        channel_coords.append((list(x_coords), list(y_coords)))
-            except:
-                continue
-    
-    # Define treatment colors (green gradient)
-    treatment_colors = {
-        0.5: '#66bb6a',   # Light green
-        1.0: '#2d7a32',   # Medium green
-        2.0: '#0d5016'    # Dark green
-    }
-    
-    # Create frames for each threshold combination
-    frames = []
-    slider_steps = []
-    
-    # Find initial frame index
-    initial_frame_idx = 0
-    
-    for frame_idx, (sdyd_val, sddc_val) in enumerate([(s, d) for s in sdyd_values for d in sddc_values]):
-        if sdyd_val == initial_sdyd and sddc_val == initial_sddc:
-            initial_frame_idx = frame_idx
-            
-        # Get data for this threshold combination
-        row_data = final_results[
-            (final_results['sdyd_threshold'] == sdyd_val) & 
-            (final_results['sddc_threshold'] == sddc_val)
-        ]
-        
-        if row_data.empty:
-            continue
-            
-        row_data = row_data.iloc[0]
-        
-        # Parse treatment data
-        try:
-            treatment_hillslopes = ast.literal_eval(row_data['treatment_hillslopes'])
-            selected_hillslopes = ast.literal_eval(row_data['selected_hillslopes'])
-        except:
-            treatment_hillslopes = []
-            selected_hillslopes = []
-        
-        # Parse untreatable data
-        try:
-            untreatable_str = str(row_data['untreatable_sdyd'])
-            if pd.isna(untreatable_str) or untreatable_str.strip() in ['nan', '', 'None']:
-                untreatable_ids = set()
-            elif 'wepp_id' in untreatable_str and 'final_Sdyd' in untreatable_str:
-                import re
-                pattern = r'^\s*(\d+)\s+[\d\.]+.*$'
-                wepp_ids = []
-                for line in untreatable_str.split('\n'):
-                    match = re.match(pattern, line)
-                    if match:
-                        wepp_ids.append(int(match.group(1)))
-                untreatable_ids = set(wepp_ids)
-            else:
-                untreatable_ids = set()
-        except:
-            untreatable_ids = set()
-        
-        # Build treatment mapping
-        treatment_map = {}
-        if isinstance(treatment_hillslopes, list) and len(treatment_hillslopes) >= 3:
-            for wepp_id in treatment_hillslopes[0]:
-                treatment_map[wepp_id] = 0.5
-            for wepp_id in treatment_hillslopes[1]:
-                treatment_map[wepp_id] = 1.0
-            for wepp_id in treatment_hillslopes[2]:
-                treatment_map[wepp_id] = 2.0
-        
-        selected_set = set(selected_hillslopes) if isinstance(selected_hillslopes, list) else set()
-        all_wepp_ids = set(hillslope_coords.keys())
-        does_not_meet_sdyd = all_wepp_ids - selected_set
-        
-        # Create traces for this frame
-        frame_data = []
-        
-        # Treatment traces (one for each level)
-        for treatment_level, color in treatment_colors.items():
-            x_coords = []
-            y_coords = []
-            hover_text = []
-            
-            for wepp_id, (x, y) in hillslope_coords.items():
-                if treatment_map.get(wepp_id) == treatment_level:
-                    x_coords.extend(x + [None])
-                    y_coords.extend(y + [None])
-                    hover_text.extend([f'WeppID: {wepp_id}<br>Treatment: {treatment_level} tons/acre'] * len(x) + [None])
-            
-            if x_coords:
-                frame_data.append(go.Scatter(
-                    x=x_coords,
-                    y=y_coords,
-                    mode='lines',
-                    fill='toself',
-                    fillcolor=color,
-                    line=dict(color='black', width=0.5),
-                    name=f'{treatment_level} tons/acre',
-                    hovertext=hover_text,
-                    hoverinfo='text',
-                    showlegend=(frame_idx == 0)
-                ))
-        
-        # Does not meet SDYD threshold trace
-        x_coords = []
-        y_coords = []
-        hover_text = []
-        for wepp_id in does_not_meet_sdyd:
-            if wepp_id in hillslope_coords:
-                x, y = hillslope_coords[wepp_id]
-                x_coords.extend(x + [None])
-                y_coords.extend(y + [None])
-                hover_text.extend([f'WeppID: {wepp_id}<br>Does not meet SDYD threshold'] * len(x) + [None])
-        
-        if x_coords:
-            frame_data.append(go.Scatter(
-                x=x_coords,
-                y=y_coords,
-                mode='lines',
-                fill='toself',
-                fillcolor='lightgray',
-                line=dict(color='red', width=1),
-                name='Does not meet SDYD threshold',
-                hovertext=hover_text,
-                hoverinfo='text',
-                showlegend=(frame_idx == 0)
-            ))
-        
-        # Untreatable trace
-        x_coords = []
-        y_coords = []
-        hover_text = []
-        for wepp_id in untreatable_ids:
-            if wepp_id in hillslope_coords:
-                x, y = hillslope_coords[wepp_id]
-                x_coords.extend(x + [None])
-                y_coords.extend(y + [None])
-                hover_text.extend([f'WeppID: {wepp_id}<br>Untreatable (exceeds SDYD limit)'] * len(x) + [None])
-        
-        if x_coords:
-            frame_data.append(go.Scatter(
-                x=x_coords,
-                y=y_coords,
-                mode='lines',
-                fill='toself',
-                fillcolor='lightgray',
-                line=dict(color='red', width=2),
-                name='Untreatable (exceeds SDYD limit)',
-                hovertext=hover_text,
-                hoverinfo='text',
-                showlegend=(frame_idx == 0)
-            ))
-        
-        # Channel trace
-        if channel_coords:
-            x_coords = []
-            y_coords = []
-            for x, y in channel_coords:
-                x_coords.extend(x + [None])
-                y_coords.extend(y + [None])
-            
-            frame_data.append(go.Scatter(
-                x=x_coords,
-                y=y_coords,
-                mode='lines',
-                line=dict(color='blue', width=2),
-                name='Stream channels',
-                hoverinfo='skip',
-                showlegend=(frame_idx == 0)
-            ))
-        
-        frames.append(go.Frame(
-            data=frame_data,
-            name=f'sdyd_{sdyd_val}_sddc_{sddc_val}',
-            layout=go.Layout(
-                title_text=f'Treatment Allocation Map<br>SDYD Threshold: {sdyd_val}, SDDC Threshold: {sddc_val}<br>Total Cost: ${row_data["total_cost"]:,.0f}'
-            )
-        ))
-        
-        slider_steps.append({
-            'args': [[f'sdyd_{sdyd_val}_sddc_{sddc_val}'], {
-                'frame': {'duration': 0, 'redraw': True},
-                'mode': 'immediate',
-                'transition': {'duration': 0}
-            }],
-            'label': f'SDYD:{sdyd_val}, SDDC:{sddc_val}',
-            'method': 'animate'
-        })
-    
-    # Create figure with initial frame
-    fig = go.Figure(
-        data=frames[initial_frame_idx].data if frames else [],
-        frames=frames,
-        layout=go.Layout(
-            title=f'Treatment Allocation Map<br>SDYD Threshold: {initial_sdyd}, SDDC Threshold: {initial_sddc}',
-            width=width,
-            height=height,
-            xaxis=dict(showticklabels=False, showgrid=False, zeroline=False, title=''),
-            yaxis=dict(showticklabels=False, showgrid=False, zeroline=False, title='', scaleanchor='x'),
-            hovermode='closest',
-            sliders=[{
-                'active': initial_frame_idx,
-                'yanchor': 'top',
-                'y': -0.1,
-                'xanchor': 'left',
-                'currentvalue': {
-                    'prefix': 'Thresholds: ',
-                    'visible': True,
-                    'xanchor': 'right'
-                },
-                'transition': {'duration': 0},
-                'pad': {'b': 10, 't': 50},
-                'len': 0.9,
-                'x': 0.05,
-                'steps': slider_steps
-            }]
-        )
-    )
-    
-    print(f"✓ Created Plotly figure with {len(frames)} threshold combinations")
-    return fig
-
-
-
-
