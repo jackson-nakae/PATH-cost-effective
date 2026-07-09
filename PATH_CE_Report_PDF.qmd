@@ -22,22 +22,35 @@ header-includes:
         \usepackage{caption}
         \captionsetup[figure]{position=top,width=0.9\linewidth,font=small,justification=centering,singlelinecheck=false}
         \captionsetup[table]{position=top,font=small,justification=centering,singlelinecheck=false}
-jupyter: python3
+jupyter: path_report_flex_venv
+# Quarto parameters you can edit at render time, e.g.:
+# quarto render PATH_CE_Report_PDF.qmd -P landscape=gatecreek -P sdyd_threshold=15 -P sddc_threshold=33922
 params:
+  # Landscape name (gatecreek, millcreek, millcreek2, or auto-detect)
+  landscape: "millcreek3"
+  # Optional machine-to-machine input payload (preferred for WEPPcloud integration)
   weppcloud_payload_json: null
   weppcloud_payload_inline: null
+  # Per‑hillslope sediment yield threshold (tons/acre)
   sdyd_threshold: 15
-  sddc_threshold: 200
+  # Watershed Sddc (tons)
+  sddc_threshold: 33922
+  # Treatments, costs ($/acre), quantity multipliers, and fixed costs (in same order)
   treatments: ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"]
   treatment_cost: [2475, 2475, 2475]
   treatment_quantity: [0.5, 1, 2]
   fixed_cost: [500, 1000, 1500]
-  hillslope_data_csv: "scenarios.hillslope_summaries.csv"
-  outlet_contrasts_csv: "contrasts.out.csv"
-  hillslope_chars_csv: "hillslopes.csv"
-  subcatchments_geojson: "subcatchments.WGS.geojson"
-  channels_geojson: "channels.WGS.geojson"
-  results_analysis_csv: "gatecreek_threshold_analysis_results.csv"
+  # Paths to input data (adjust if needed) - will be auto-resolved
+  hillslope_data_csv: null
+  outlet_contrasts_csv: null
+  hillslope_chars_csv: null
+  # Spatial data (GeoJSON or GDB)
+  subcatchments_geojson: null
+  channels_geojson: null
+  # Threshold sweep data resolved from landscape prefix
+  results_analysis_csv: null
+  # Contrast path for hillslope groups (millcreek/millcreek2)
+  contrast_path_dir: null
 ---
 
 ```{python}
@@ -59,8 +72,9 @@ import io
 import textwrap
 from contextlib import redirect_stdout, redirect_stderr
 
-from PATH_CE import path_data_ag, ce_select_sites_2
-from PATH_Plots import find_threshold_ranges, all_thresholds, plot_sddc_vs_cost, plot_sdyd_vs_cost
+from PATH_CE import ce_select_sites_flexible
+from PATH_plot import find_threshold_ranges, all_thresholds, plot_sddc_vs_cost, plot_sdyd_vs_cost
+from PATH_data_prep import prepare_ce_and_plot_data
 from IPython.display import Markdown, display
 ```
 
@@ -83,7 +97,24 @@ Users have the ability to input values for Hillslope Sediment Yield Threshold, O
 try:
     params
 except NameError:
-    params = {}
+    params = {
+        "landscape": "auto",
+        "weppcloud_payload_json": None,
+        "weppcloud_payload_inline": None,
+        "sdyd_threshold": 15,
+        "sddc_threshold": 33922,
+        "treatments": ["0.5 tons/acre", "1 tons/acre", "2 tons/acre"],
+        "treatment_cost": [2475, 2475, 2475],
+        "treatment_quantity": [0.5, 1, 2],
+        "fixed_cost": [500, 1000, 1500],
+        "hillslope_data_csv": None,
+        "outlet_contrasts_csv": None,
+        "hillslope_chars_csv": None,
+        "subcatchments_geojson": None,
+        "channels_geojson": None,
+        "results_analysis_csv": None,
+        "contrast_path_dir": None,
+    }
 
 def _parse_json_like(value):
     if isinstance(value, (list, dict, int, float)):
@@ -123,6 +154,16 @@ def _to_float(value, default):
         return float(value)
     except Exception:
         return float(default)
+
+def _to_float_required(value, name):
+    if value is None:
+        raise ValueError(f"Missing required threshold: {name}. Set it in params or payload.")
+    if isinstance(value, str) and value.strip() == "":
+        raise ValueError(f"Missing required threshold: {name}. Set it in params or payload.")
+    try:
+        return float(value)
+    except Exception as exc:
+        raise ValueError(f"Invalid threshold value for {name}: {value!r}") from exc
 
 def _to_num_list(value, default):
     parsed = _parse_json_like(value)
@@ -192,35 +233,118 @@ def _resolve_existing_path(primary_value, fallback_values):
             return candidate_str
     return str(primary_value)
 
+def _detect_landscape():
+    prefixes = []
+    patterns = [
+        "*_scenarios.hillslope_summaries.csv",
+        "*_contrasts.out.csv",
+        "*_hillslopes.parquet",
+        "*_contrast_id_definitions.psv",
+        "*_subcatchments.WGS.*",
+        "*_channels.WGS.*",
+    ]
+    for pattern in patterns:
+        for path in Path(".").glob(pattern):
+            prefix = path.name.split("_", 1)[0].strip()
+            if prefix:
+                prefixes.append(prefix)
+    if prefixes:
+        return max(set(prefixes), key=prefixes.count)
+    raise ValueError(
+        "Could not auto-detect landscape from files in the working directory. "
+        "Set params.landscape explicitly."
+    )
+
+def _prefixed_candidates(landscape, suffixes):
+    return [f"{landscape}_{suffix}" for suffix in suffixes]
+
+def _get_landscape_defaults(landscape):
+    landscape = str(landscape).strip()
+    return {
+        "hillslope_data_csv": _prefixed_candidates(landscape, ["scenarios.hillslope_summaries.csv", "scenarios.out.csv"]),
+        "outlet_contrasts_csv": _prefixed_candidates(landscape, ["contrasts.out.csv", "mulch_15_contrasts.out.csv", "mulch_30_contrasts.out.csv", "mulch_60_contrasts.out.csv"]),
+        "hillslope_chars_csv": _prefixed_candidates(landscape, ["hillslopes.parquet", "hillslopes.csv"]),
+        "subcatchments_geojson": _prefixed_candidates(landscape, ["subcatchments.WGS.geojson", "subcatchments.WGS.JSON"]),
+        "channels_geojson": _prefixed_candidates(landscape, ["channels.WGS.geojson", "channels.WGS.JSON"]),
+        "results_analysis_csv": [
+            f"static/downloads/{landscape}_threshold_analysis_results_generated.csv",
+            f"{landscape}_threshold_analysis_results_generated.csv",
+            f"{landscape}_threshold_analysis_results.csv",
+            f"{landscape}_results_df.csv",
+        ],
+        "contrast_groups_file": _prefixed_candidates(landscape, ["contrast_id_definitions.psv"]),
+        "contrast_path_dir": f"{landscape}_contrasts_tsv",
+    }
+
+def resolve_data_path(param_value, defaults_key, landscape_defaults):
+    if param_value is not None and Path(str(param_value)).exists():
+        return str(param_value)
+    fallback_list = landscape_defaults.get(defaults_key, [])
+    if isinstance(fallback_list, str):
+        fallback_list = [fallback_list]
+    for candidate in fallback_list:
+        if Path(candidate).exists():
+            return str(candidate)
+    return str(fallback_list[0]) if fallback_list else param_value
+
+def _first_topaz_id(value):
+    parsed = _parse_json_like(value)
+    if isinstance(parsed, list) and parsed:
+        try:
+            return int(float(parsed[0]))
+        except Exception:
+            return np.nan
+    try:
+        return int(float(parsed))
+    except Exception:
+        return np.nan
+
 payload, payload_enabled = _load_weppcloud_payload(params)
 
-sdyd_threshold = _to_float(
-    _resolve_value(
-        params.get("sdyd_threshold"),
-        _first_not_none(
-            _payload_get(payload, "sdyd_threshold"),
-            _payload_get(payload, "thresholds", "sdyd_threshold"),
-            _payload_get(payload, "thresholds", "sdyd"),
-        ),
-        15,
-        payload_enabled,
+landscape = params.get("landscape") if isinstance(params, dict) else None
+if not landscape:
+    landscape = _detect_landscape()
+if isinstance(landscape, str):
+    landscape = landscape.strip()
+landscape_override = os.getenv("PATH_REPORT_LANDSCAPE")
+if landscape_override:
+    landscape = landscape_override
+if landscape == "auto":
+    landscape = _detect_landscape()
+landscape_defaults = _get_landscape_defaults(landscape)
+
+sdyd_threshold_raw = _resolve_value(
+    params.get("sdyd_threshold"),
+    _first_not_none(
+        _payload_get(payload, "sdyd_threshold"),
+        _payload_get(payload, "thresholds", "sdyd_threshold"),
+        _payload_get(payload, "thresholds", "sdyd"),
     ),
-    15,
+    None,
+    payload_enabled,
 )
 
-sddc_threshold = _to_float(
-    _resolve_value(
-        params.get("sddc_threshold"),
-        _first_not_none(
-            _payload_get(payload, "sddc_threshold"),
-            _payload_get(payload, "thresholds", "sddc_threshold"),
-            _payload_get(payload, "thresholds", "sddc"),
-        ),
-        200,
-        payload_enabled,
+sddc_threshold_raw = _resolve_value(
+    params.get("sddc_threshold"),
+    _first_not_none(
+        _payload_get(payload, "sddc_threshold"),
+        _payload_get(payload, "thresholds", "sddc_threshold"),
+        _payload_get(payload, "thresholds", "sddc"),
     ),
-    200,
+    None,
+    payload_enabled,
 )
+
+sdyd_override = os.getenv("PATH_REPORT_SDYD_THRESHOLD")
+if sdyd_override is not None and sdyd_override != "":
+    sdyd_threshold_raw = sdyd_override
+
+sddc_override = os.getenv("PATH_REPORT_SDDC_THRESHOLD")
+if sddc_override is not None and sddc_override != "":
+    sddc_threshold_raw = sddc_override
+
+sdyd_threshold = _to_float_required(sdyd_threshold_raw, "sdyd_threshold")
+sddc_threshold = _to_float_required(sddc_threshold_raw, "sddc_threshold")
 
 treatment_objects = _payload_get(payload, "treatments")
 has_object_treatments = (
@@ -265,20 +389,25 @@ spatial_files = _payload_get(payload, "spatial_files") if isinstance(_payload_ge
 
 hillslope_data_csv = _first_not_none(
     _resolve_value(params.get("hillslope_data_csv"), input_files.get("hillslope_data_csv"),
-                   "scenarios.hillslope_summaries.csv", payload_enabled))
+                   None, payload_enabled))
+hillslope_data_csv = resolve_data_path(hillslope_data_csv, "hillslope_data_csv", landscape_defaults)
 outlet_contrasts_csv = _first_not_none(
     _resolve_value(params.get("outlet_contrasts_csv"), input_files.get("outlet_contrasts_csv"),
-                   "contrasts.out.csv", payload_enabled))
+                   None, payload_enabled))
+outlet_contrasts_csv = resolve_data_path(outlet_contrasts_csv, "outlet_contrasts_csv", landscape_defaults)
 hillslope_chars_csv = _first_not_none(
     _resolve_value(params.get("hillslope_chars_csv"), input_files.get("hillslope_chars_csv"),
-                   "hillslopes.csv", payload_enabled))
+                   None, payload_enabled))
+hillslope_chars_csv = resolve_data_path(hillslope_chars_csv, "hillslope_chars_csv", landscape_defaults)
 
 subcatchments_geojson = _first_not_none(
     _resolve_value(params.get("subcatchments_geojson"), spatial_files.get("subcatchments_geojson"),
-                   "subcatchments.WGS.geojson", payload_enabled))
+                   None, payload_enabled))
+subcatchments_geojson = resolve_data_path(subcatchments_geojson, "subcatchments_geojson", landscape_defaults)
 channels_geojson = _first_not_none(
     _resolve_value(params.get("channels_geojson"), spatial_files.get("channels_geojson"),
-                   "channels.WGS.geojson", payload_enabled))
+                   None, payload_enabled))
+channels_geojson = resolve_data_path(channels_geojson, "channels_geojson", landscape_defaults)
 
 results_analysis_csv = _first_not_none(
     _resolve_value(params.get("results_analysis_csv"),
@@ -286,19 +415,53 @@ results_analysis_csv = _first_not_none(
                        _payload_get(payload, "results_analysis_csv"),
                        _payload_get(payload, "analysis", "results_analysis_csv"),
                    ),
-                   "gatecreek_threshold_analysis_results.csv",
+                   None,
                    payload_enabled))
-results_analysis_csv = _resolve_existing_path(
-    results_analysis_csv,
-    ["gatecreek_threshold_analysis_results.csv",
-     "static/gatecreek_threshold_analysis_results_50.csv",
-     "gatecreek_threshold_analysis_results_50.csv"])
+results_analysis_csv = resolve_data_path(results_analysis_csv, "results_analysis_csv", landscape_defaults)
 
-final_df = path_data_ag(
-    hillslope_data=hillslope_data_csv,
-    outlet_data=outlet_contrasts_csv,
-    hillslope_char_data=hillslope_chars_csv
+contrast_groups_file = resolve_data_path(None, "contrast_groups_file", landscape_defaults)
+if contrast_groups_file and not Path(str(contrast_groups_file)).exists():
+    contrast_groups_file = None
+contrast_path = params.get("contrast_path_dir") or landscape_defaults.get("contrast_path_dir")
+if contrast_path and not Path(contrast_path).is_dir():
+    contrast_path = None
+
+if str(hillslope_data_csv).endswith(".parquet"):
+    hillslope_df = pd.read_parquet(hillslope_data_csv)
+else:
+    hillslope_df = pd.read_csv(hillslope_data_csv)
+outlet_df = pd.read_csv(outlet_contrasts_csv)
+if str(hillslope_chars_csv).endswith(".parquet"):
+    hillslope_char_df = pd.read_parquet(hillslope_chars_csv)
+else:
+    hillslope_char_df = pd.read_csv(hillslope_chars_csv)
+
+_, _, _, final_df = prepare_ce_and_plot_data(
+    hillslopes=hillslope_df,
+    contrasts=outlet_df,
+    hillslope_char=hillslope_char_df,
+    contrast_path=contrast_path,
+    contrast_groups=contrast_groups_file,
+    write_outputs=False,
 )
+
+if "wepp_id" not in final_df.columns and "contrast_id" in final_df.columns:
+    final_df["wepp_id"] = final_df["contrast_id"]
+if "area" not in final_df.columns and "area_sum" in final_df.columns:
+    final_df["area"] = final_df["area_sum"]
+if "TopazID" not in final_df.columns and "topaz_ids" in final_df.columns:
+    final_df["TopazID"] = final_df["topaz_ids"].apply(_first_topaz_id)
+
+def _is_grouped_topaz(value):
+    ids = _parse_json_like(value)
+    return isinstance(ids, list) and len(ids) > 1
+
+has_grouping = False
+if "topaz_ids" in final_df.columns:
+    has_grouping = bool(final_df["topaz_ids"].apply(_is_grouped_topaz).any())
+
+id_column = "contrast_id" if has_grouping else "wepp_id"
+area_column = "area_sum" if has_grouping and "area_sum" in final_df.columns else "area"
 
 treatments_display = [
     f"mulch {treatment}" if not str(treatment).lower().startswith("mulch ") else str(treatment)
@@ -341,7 +504,8 @@ with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         untreatable_sdyd,
         total_cost,
         total_fixed_cost,
-    ) = ce_select_sites_2(
+        untreatable_sdyd_increase,
+    ) = ce_select_sites_flexible(
         data=final_df,
         treatments=treatments,
         treatment_cost=treatment_cost,
@@ -349,14 +513,16 @@ with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         fixed_cost=fixed_cost,
         sdyd_threshold=sdyd_threshold,
         sddc_threshold=sddc_threshold,
-        slope_range=(None),
-        bs_threshold=(None),
+        slope_range=None,
+        bs_threshold=None,
+        id_col=id_column,
+        area_col=area_column,
     )
 
 assignments = []
 for t, hills in zip(treatments, treatment_hillslopes):
     for h in hills:
-        assignments.append({"wepp_id": h, "treatment": t})
+        assignments.append({id_column: h, "treatment": t})
 assign_df = pd.DataFrame(assignments)
 ```
 
@@ -395,8 +561,27 @@ treat_colors = {
 }
 untreated_fill = "#e7e9e5"
 
-attrs = final_df[["wepp_id", "TopazID"]].copy()
-attrs = attrs.merge(assign_df, on="wepp_id", how="left")
+if "topaz_ids" in final_df.columns:
+    expanded_rows = []
+    for _, row in final_df.iterrows():
+        topaz_list = _parse_json_like(row.get("topaz_ids", []))
+        if not topaz_list and pd.notna(row.get("TopazID")):
+            topaz_list = [row.get("TopazID")]
+        for topaz_id in topaz_list:
+            row_copy = row.copy()
+            row_copy["TopazID"] = topaz_id
+            expanded_rows.append(row_copy)
+    attrs = pd.DataFrame(expanded_rows) if expanded_rows else final_df.copy()
+else:
+    attrs = final_df.copy()
+
+attrs["TopazID"] = pd.to_numeric(attrs["TopazID"], errors="coerce").astype("Int64")
+if not assign_df.empty:
+    assign_df[id_column] = pd.to_numeric(assign_df[id_column], errors="coerce").astype("Int64")
+attrs[id_column] = pd.to_numeric(attrs[id_column], errors="coerce").astype("Int64")
+attrs = attrs[[id_column, "TopazID"]].dropna(subset=["TopazID"])
+attrs = attrs.merge(assign_df, on=id_column, how="left")
+gdf_sub["TopazID"] = pd.to_numeric(gdf_sub["TopazID"], errors="coerce").astype("Int64")
 gdf_map = gdf_sub.merge(attrs, on="TopazID", how="left").to_crs(epsg=4326)
 
 def _make_hillslope_map(gdf_map, gdf_channels, assign_df, untreatable_sdyd,
@@ -435,8 +620,9 @@ def _make_hillslope_map(gdf_map, gdf_channels, assign_df, untreatable_sdyd,
         gdf_channels.to_crs(epsg=3857).plot(ax=ax, color="#50a5d6", linewidth=0.8, zorder=3)
 
     if untreatable_sdyd is not None and not untreatable_sdyd.empty:
-        u_ids = set(untreatable_sdyd["wepp_id"].tolist())
-        u_topaz = final_df.loc[final_df["wepp_id"].isin(u_ids), "TopazID"]
+        u_col = id_column if id_column in untreatable_sdyd.columns else "wepp_id"
+        u_ids = set(pd.to_numeric(untreatable_sdyd[u_col], errors="coerce").dropna().astype(int).tolist())
+        u_topaz = attrs.loc[attrs[id_column].isin(u_ids), "TopazID"]
         gdf_u = gdf_map_plot[gdf_map_plot["TopazID"].isin(u_topaz)]
         if len(gdf_u) > 0:
             gdf_u.plot(ax=ax, facecolor="none", edgecolor="red", linewidth=1.5, zorder=4)
@@ -510,23 +696,31 @@ pd.set_option('display.max_columns', None)
 pd.set_option('display.width', None)
 
 assign_clean = assign_df.copy()
-if not assign_clean.empty:
-    assign_clean["wepp_id"] = pd.to_numeric(assign_clean["wepp_id"], errors="coerce").astype("Int64")
+if not assign_clean.empty and id_column in assign_clean.columns:
+    assign_clean[id_column] = pd.to_numeric(assign_clean[id_column], errors="coerce").astype("Int64")
 
 sdyd_clean = sdyd_df.copy()
-sdyd_clean["wepp_id"] = pd.to_numeric(sdyd_clean["wepp_id"], errors="coerce").astype("Int64")
+if id_column not in sdyd_clean.columns:
+    if "wepp_id" in sdyd_clean.columns:
+        sdyd_clean = sdyd_clean.rename(columns={"wepp_id": id_column})
+    elif "contrast_id" in sdyd_clean.columns:
+        sdyd_clean = sdyd_clean.rename(columns={"contrast_id": id_column})
+sdyd_clean[id_column] = pd.to_numeric(sdyd_clean[id_column], errors="coerce").astype("Int64")
 
-combined_df = sdyd_clean.merge(assign_clean[["wepp_id", "treatment"]], on="wepp_id", how="left")
+merge_cols = [id_column, "treatment"] if id_column in assign_clean.columns else ["treatment"]
+combined_df = sdyd_clean.merge(assign_clean[merge_cols], on=id_column, how="left")
 combined_df["treatment"] = combined_df["treatment"].fillna("No treatment")
 
-u_ids = set(pd.to_numeric(untreatable_sdyd["wepp_id"], errors="coerce").dropna().astype(int).tolist()) if not untreatable_sdyd.empty else set()
-combined_df["sdyd_threshold_exceeded"] = combined_df["wepp_id"].astype("Int64").isin(u_ids)
+u_col = id_column if id_column in untreatable_sdyd.columns else "wepp_id"
+u_ids = set(pd.to_numeric(untreatable_sdyd[u_col], errors="coerce").dropna().astype(int).tolist()) if (not untreatable_sdyd.empty and u_col in untreatable_sdyd.columns) else set()
+combined_df["sdyd_threshold_exceeded"] = combined_df[id_column].astype("Int64").isin(u_ids)
 
-# Ensure integer display for wepp_id (no float formatting)
-combined_df["wepp_id"] = combined_df["wepp_id"].astype("Int64")
-combined_df = combined_df.sort_values("wepp_id").reset_index(drop=True)
-combined_df_display = combined_df[["wepp_id", "final_Sdyd", "treatment"]].rename(columns={
-    "wepp_id": "Wepp ID",
+# Ensure integer display for selected id column (no float formatting)
+combined_df[id_column] = combined_df[id_column].astype("Int64")
+combined_df = combined_df.sort_values(id_column).reset_index(drop=True)
+id_display = "Hillslope Group" if has_grouping else "Wepp ID"
+combined_df_display = combined_df[[id_column, "final_Sdyd", "treatment"]].rename(columns={
+    id_column: id_display,
     "final_Sdyd": "Final Sediment Yield (tons/acre)",
     "treatment": "Treatment",
 })
@@ -585,7 +779,7 @@ The following maps show the hillslopes selected for treatment using threshold pa
 #| echo: false
 #| fig-width: 7
 #| fig-height: 8
-#| fig-cap: "Selected hillslopes for the 25th, 50th, and 75th percentile Sdyd and Sddc threshold pairs, rounded down to the nearest evaluated thresholds."
+#| fig-cap: "Selected hillslopes and treatments for the 25th, 50th, and 75th percentile sediment threshold pairs."
 
 # Find percentile threshold pairs using the evaluated Sdyd and Sddc ranges.
 sdyd_thresholds = np.sort(results_df["sdyd_threshold"].dropna().unique())
@@ -639,7 +833,7 @@ def _build_gdf_for_row(row, gdf_sub, final_df, treatments, treatment_cost, treat
     sddc_val = float(row["sddc_threshold"])
 
     th_hillslopes = []
-    untreatable_df = pd.DataFrame(columns=["wepp_id", "final_Sdyd"])
+    untreatable_df = pd.DataFrame(columns=[id_column, "final_Sdyd"])
 
     try:
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
@@ -656,7 +850,8 @@ def _build_gdf_for_row(row, gdf_sub, final_df, treatments, treatment_cost, treat
                 untreatable_recomputed,
                 _total_cost,
                 _total_fixed_cost,
-            ) = ce_select_sites_2(
+                _untreatable_sdyd_increase,
+            ) = ce_select_sites_flexible(
                 data=final_df,
                 treatments=treatments,
                 treatment_cost=treatment_cost,
@@ -664,14 +859,17 @@ def _build_gdf_for_row(row, gdf_sub, final_df, treatments, treatment_cost, treat
                 fixed_cost=fixed_cost,
                 sdyd_threshold=sdyd_val,
                 sddc_threshold=sddc_val,
-                slope_range=(None),
-                bs_threshold=(None),
+                slope_range=None,
+                bs_threshold=None,
+                id_col=id_column,
+                area_col=area_column,
             )
-        if isinstance(_sdyd_df, pd.DataFrame) and {"wepp_id", "final_Sdyd"}.issubset(_sdyd_df.columns):
+        sdyd_id_col = id_column if (isinstance(_sdyd_df, pd.DataFrame) and id_column in _sdyd_df.columns) else "wepp_id"
+        if isinstance(_sdyd_df, pd.DataFrame) and {sdyd_id_col, "final_Sdyd"}.issubset(_sdyd_df.columns):
             sdyd_recomputed = _sdyd_df.copy()
-            sdyd_recomputed["wepp_id"] = pd.to_numeric(sdyd_recomputed["wepp_id"], errors="coerce").astype("Int64")
+            sdyd_recomputed[id_column] = pd.to_numeric(sdyd_recomputed[sdyd_id_col], errors="coerce").astype("Int64")
             sdyd_recomputed["final_Sdyd"] = pd.to_numeric(sdyd_recomputed["final_Sdyd"], errors="coerce")
-            untreatable_df = sdyd_recomputed[sdyd_recomputed["final_Sdyd"] > sdyd_val][["wepp_id", "final_Sdyd"]].copy()
+            untreatable_df = sdyd_recomputed[sdyd_recomputed["final_Sdyd"] > sdyd_val][[id_column, "final_Sdyd"]].copy()
         elif isinstance(untreatable_recomputed, pd.DataFrame):
             untreatable_df = untreatable_recomputed.copy()
     except Exception:
@@ -693,7 +891,7 @@ def _build_gdf_for_row(row, gdf_sub, final_df, treatments, treatment_cost, treat
                 for line in untreatable_raw.split('\n')
                 if (m := re.match(pattern, line))
             ]
-            untreatable_df = pd.DataFrame({"wepp_id": wepp_ids})
+            untreatable_df = pd.DataFrame({id_column: wepp_ids})
 
     if len(th_hillslopes) < len(treatments):
         th_hillslopes = th_hillslopes + ([[]] * (len(treatments) - len(th_hillslopes)))
@@ -702,15 +900,33 @@ def _build_gdf_for_row(row, gdf_sub, final_df, treatments, treatment_cost, treat
     for t, hills in zip(treatments, th_hillslopes[:len(treatments)]):
         hills = hills if isinstance(hills, list) else []
         for h in hills:
-            th_assignments.append({"wepp_id": h, "treatment": t})
-    th_assign = pd.DataFrame(th_assignments) if th_assignments else pd.DataFrame(columns=["wepp_id", "treatment"])
+            th_assignments.append({id_column: h, "treatment": t})
+    th_assign = pd.DataFrame(th_assignments) if th_assignments else pd.DataFrame(columns=[id_column, "treatment"])
     if not th_assign.empty:
-        th_assign["wepp_id"] = pd.to_numeric(th_assign["wepp_id"], errors="coerce").astype("Int64")
+        th_assign[id_column] = pd.to_numeric(th_assign[id_column], errors="coerce").astype("Int64")
 
-    attrs = final_df[["wepp_id", "TopazID"]].copy()
-    attrs["wepp_id"] = pd.to_numeric(attrs["wepp_id"], errors="coerce").astype("Int64")
-    attrs = attrs.merge(th_assign, on="wepp_id", how="left")
-    gdf = gdf_sub.to_crs(epsg=4326).merge(attrs, on="TopazID", how="left")
+    if "topaz_ids" in final_df.columns:
+        expanded_rows = []
+        for _, src_row in final_df.iterrows():
+            topaz_list = _parse_json_like(src_row.get("topaz_ids", []))
+            if not topaz_list and pd.notna(src_row.get("TopazID")):
+                topaz_list = [src_row.get("TopazID")]
+            for topaz_id in topaz_list:
+                row_copy = src_row.copy()
+                row_copy["TopazID"] = topaz_id
+                expanded_rows.append(row_copy)
+        attrs = pd.DataFrame(expanded_rows) if expanded_rows else final_df.copy()
+    else:
+        attrs = final_df.copy()
+
+    attrs[id_column] = pd.to_numeric(attrs[id_column], errors="coerce").astype("Int64")
+    attrs["TopazID"] = pd.to_numeric(attrs["TopazID"], errors="coerce").astype("Int64")
+    attrs = attrs[[id_column, "TopazID"]].dropna(subset=["TopazID"])
+    attrs = attrs.merge(th_assign, on=id_column, how="left")
+
+    gdf_sub_local = gdf_sub.to_crs(epsg=4326).copy()
+    gdf_sub_local["TopazID"] = pd.to_numeric(gdf_sub_local["TopazID"], errors="coerce").astype("Int64")
+    gdf = gdf_sub_local.merge(attrs, on="TopazID", how="left")
     return gdf, untreatable_df
 
 fig, axes = plt.subplots(3, 1, figsize=(7, 12))

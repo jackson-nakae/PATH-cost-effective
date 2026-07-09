@@ -1,18 +1,39 @@
-.venv/
+# ── Python ──────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-*.pyd
-.ipynb_checkpoints/
+.venv/
+env/
+*.egg-info/
 
-# OS/editor artifacts
+# ── Quarto build outputs ─────────────────────────────────
+*.pdf
+PATH_CE_Report_Universal.html
+PATH_CE_Report_PDF.html
+docs/
+_tmp_render_params.yml
+render_output.txt
+render_check.txt
+
+# ── WEPPcloud-supplied data files ────────────────────────
+# (CSVs, PSVs, GeoJSON, Parquet — provided per-project at runtime)
+*.csv
+*.psv
+*.parquet
+*.geojson
+*.JSON
+*.json
+# Keep non-data JSON if needed — override below:
+# !static/js/some_config.json
+
+# ── Generated threshold cache ────────────────────────────
+static/downloads/
+
+# ── dist / handoff bundles ───────────────────────────────
+dist/
+
+# ── OS / editor ──────────────────────────────────────────
 .DS_Store
 Thumbs.db
 .vscode/
-
-# Build artifacts
-dist/
-*.log
-
-# Local scratch artifacts
-.vdoc.*.py
+*.swp

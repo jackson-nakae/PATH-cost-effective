@@ -104,13 +104,30 @@ async function resolveDeckApi() {
 }
 
 const COLORS = {
-  untreated: [211, 211, 211, 105],
-  tier1: [178, 223, 138, 145],
-  tier2: [51, 160, 44, 145],
-  tier3: [0, 100, 0, 145],
+  untreated: [211, 211, 211, 200],
+  tier1: [178, 223, 138, 220],
+  tier2: [51, 160, 44, 220],
+  tier3: [0, 100, 0, 220],
   outline: [0, 0, 0, 180],
   untreatable: [220, 32, 32, 220],
+  sdydIncrease: [255, 200, 0, 255],
   channels: [80, 165, 214, 255]
+};
+
+const FEATURE_ID_FIELDS = [
+  {key: 'wepp_id', label: 'WeppID'},
+  {key: 'WeppID', label: 'WeppID'},
+  {key: 'weppId', label: 'WeppID'},
+  {key: 'WEPPID', label: 'WeppID'},
+  {key: 'contrast_id', label: 'Contrast ID'},
+  {key: 'contrastId', label: 'Contrast ID'},
+  {key: 'ContrastID', label: 'Contrast ID'},
+  {key: 'CONTRAST_ID', label: 'Contrast ID'}
+];
+
+const FEATURE_ID_FIELD_GROUPS = {
+  wepp_id: FEATURE_ID_FIELDS.filter(field => field.label === 'WeppID'),
+  contrast_id: FEATURE_ID_FIELDS.filter(field => field.label === 'Contrast ID')
 };
 
 function parseJsonish(value) {
@@ -143,7 +160,7 @@ function parseNumberArray(value) {
     return parsed.map(Number).filter(Number.isFinite);
   }
   if (typeof value === 'string') {
-    const matches = value.match(/-?\\d+(?:\\.\\d+)?/g);
+    const matches = value.match(/-?\d+(?:\.\d+)?/g);
     if (!matches) {
       return [];
     }
@@ -155,7 +172,21 @@ function parseNumberArray(value) {
 function parseNestedNumberArray(value) {
   const parsed = parseJsonish(value);
   if (Array.isArray(parsed)) {
-    return parsed.map(item => (Array.isArray(item) ? item.map(Number) : []));
+    return parsed.map(item => (Array.isArray(item) ? item.map(Number).filter(Number.isFinite) : []));
+  }
+  if (typeof value === 'string') {
+    // Fallback for CSV strings that are valid-ish arrays but not strict JSON.
+    const normalized = value.trim();
+    if (normalized.startsWith('[') && normalized.endsWith(']')) {
+      try {
+        const parsedFallback = JSON.parse(normalized.replace(/'/g, '"'));
+        if (Array.isArray(parsedFallback)) {
+          return parsedFallback.map(item => (Array.isArray(item) ? item.map(Number).filter(Number.isFinite) : []));
+        }
+      } catch (err) {
+        return [];
+      }
+    }
   }
   return [];
 }
@@ -177,21 +208,37 @@ function getUntreatableFromHillslopes(hillslopesSdyd, sdydThreshold) {
     .map(h => h.weppId);
 }
 
-function getFeatureWeppId(feature) {
+function getFeatureIdentifier(feature, preferredIdField = null) {
   const props = feature?.properties || {};
-  const raw = props.WeppID ?? props.wepp_id ?? props.weppId ?? props.WEPPID;
-  const id = Number(raw);
-  return Number.isFinite(id) ? id : null;
-}
+  if (preferredIdField) {
+    const preferredLabel = preferredIdField === 'contrast_id' ? 'Contrast ID' : 'WeppID';
 
-function getFeatureProp(feature, aliases) {
-  const props = feature?.properties || {};
-  for (const key of aliases) {
-    if (props[key] != null && props[key] !== '') {
-      return props[key];
+    // Try exact field first.
+    const strictId = Number(props[preferredIdField]);
+    if (Number.isFinite(strictId)) {
+      return {id: strictId, label: preferredLabel};
+    }
+
+    // Fall back to known aliases so `wepp_id` can match `WeppID` and similar.
+    const preferredGroup = FEATURE_ID_FIELD_GROUPS[preferredIdField] || [{key: preferredIdField, label: preferredLabel}];
+    for (const field of preferredGroup) {
+      const aliasId = Number(props[field.key]);
+      if (Number.isFinite(aliasId)) {
+        return {id: aliasId, label: field.label};
+      }
+    }
+
+    return {id: null, label: preferredLabel};
+  }
+
+  const fields = FEATURE_ID_FIELDS;
+  for (const field of fields) {
+    const id = Number(props[field.key]);
+    if (Number.isFinite(id)) {
+      return {id, label: field.label};
     }
   }
-  return null;
+  return {id: null, label: 'ID'};
 }
 
 function getGeojsonBounds(geojson) {
@@ -248,6 +295,7 @@ function normalizeRows(rows) {
     const treatments = parseNestedNumberArray(row.treatment_hillslopes);
     const hillslopesSdyd = parseHillslopesSdyd(row.hillslopes_sdyd);
     const untreatable = getUntreatableFromHillslopes(hillslopesSdyd, sdyd);
+    const sdydIncreaseIds = parseNumberArray(row.untreatable_sdyd_increase);
 
     const key = `${sdyd}_${sddc}`;
     selectionByKey.set(key, {
@@ -255,8 +303,8 @@ function normalizeRows(rows) {
       sddc,
       selected,
       treatments,
-      hillslopesSdyd,
       untreatable,
+      sdydIncreaseIds,
       totalCost: Number(row.total_cost),
       finalSddc: Number(row.final_Sddc)
     });
@@ -280,14 +328,6 @@ function formatNumber(value, digits = 0) {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits
   });
-}
-
-function formatMaybeNumber(value, digits = 2) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) {
-    return value == null || value === '' ? 'N/A' : String(value);
-  }
-  return formatNumber(n, digits);
 }
 
 function parseCsvFallback(csvText) {
@@ -463,9 +503,10 @@ function renderLegend(container, selection) {
 
   const items = [
     {label: 'Untreated', color: COLORS.untreated},
-    {label: 'mulch 0.5 tons/acre', color: COLORS.tier1},
-    {label: 'mulch 1 tons/acre', color: COLORS.tier2},
-    {label: 'mulch 2 tons/acre', color: COLORS.tier3},
+    {label: '0.5 tons/acre', color: COLORS.tier1},
+    {label: '1 tons/acre', color: COLORS.tier2},
+    {label: '2 tons/acre', color: COLORS.tier3},
+    {label: 'Sdyd increases after treatment', color: COLORS.sdydIncrease, outlineOnly: true},
     {label: 'Hillslope Sdyd threshold not met', color: COLORS.untreatable, outlineOnly: true}
   ];
 
@@ -478,7 +519,7 @@ function renderLegend(container, selection) {
     swatch.className = 'gl-legend-categorical__swatch';
     swatch.style.backgroundColor = item.outlineOnly ? 'transparent' : `rgba(${item.color.join(',')})`;
     if (item.outlineOnly) {
-      swatch.style.borderColor = `rgba(${COLORS.untreatable.join(',')})`;
+      swatch.style.borderColor = `rgba(${item.color.join(',')})`;
     }
     const label = document.createElement('span');
     label.textContent = item.label;
@@ -513,6 +554,7 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
     channelsData = null,
     initialSdyd = 20,
     initialSddc = 200,
+    selectionIdField = null,
     height = 340
   } = options || {};
 
@@ -529,7 +571,6 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
   const mapEl = document.createElement('div');
   mapEl.className = 'hillmap-map';
   mapEl.style.height = `${height}px`;
-  mapEl.style.backgroundColor = '#e8f0f7';
   const legend = document.createElement('div');
   legend.className = 'hillmap-legend';
   const tooltip = document.createElement('div');
@@ -577,21 +618,21 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
 
   let currentSelection = null;
 
-  function getCategoryLabel(weppId, selection) {
-    if (!selection || weppId == null) {
+  function getCategoryLabel(unitId, selection) {
+    if (!selection || unitId == null) {
       return 'Untreated';
     }
-    if (selection.untreatableSet?.has(weppId)) {
+    if (selection.untreatableSet?.has(unitId)) {
       return 'Hillslope Sdyd threshold not met';
     }
-    if (selection.tier3Set?.has(weppId)) {
-      return 'mulch 2 tons/acre';
+    if (selection.tier3Set?.has(unitId)) {
+      return '2 tons/acre';
     }
-    if (selection.tier2Set?.has(weppId)) {
-      return 'mulch 1 tons/acre';
+    if (selection.tier2Set?.has(unitId)) {
+      return '1 tons/acre';
     }
-    if (selection.tier1Set?.has(weppId)) {
-      return 'mulch 0.5 tons/acre';
+    if (selection.tier1Set?.has(unitId)) {
+      return '0.5 tons/acre';
     }
     return 'Untreated';
   }
@@ -601,20 +642,17 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       tooltip.style.display = 'none';
       return;
     }
-    const weppId = getFeatureWeppId(info.object);
-    if (weppId == null) {
+    const {id: unitId, label: unitLabel} = getFeatureIdentifier(info.object, selectionIdField);
+    if (unitId == null) {
       tooltip.style.display = 'none';
       return;
     }
-
-    const topazId = getFeatureProp(info.object, ['TopazID', 'topaz_id', 'TOPAZID', 'Topaz_Id']);
-    const category = getCategoryLabel(weppId, currentSelection);
-
-    const finalSdyd = currentSelection?.hillslopeSdydByWepp?.get(weppId);
+    const category = getCategoryLabel(unitId, currentSelection);
     tooltip.innerHTML = `
-      <div class="hillmap-tooltip__row">TopazID: ${topazId ?? 'N/A'}</div>
-      <div class="hillmap-tooltip__row">Treatment: ${category}</div>
-      <div class="hillmap-tooltip__row">Final Sdyd (t/ac): ${formatMaybeNumber(finalSdyd, 2)}</div>
+      <div class="hillmap-tooltip__title">${unitLabel} ${unitId}</div>
+      <div class="hillmap-tooltip__row">${category}</div>
+      <div class="hillmap-tooltip__row">Sdyd: ${currentSelection?.sdyd ?? 'N/A'}</div>
+      <div class="hillmap-tooltip__row">Sddc: ${currentSelection?.sddc ?? 'N/A'}</div>
     `;
     tooltip.style.display = 'block';
     tooltip.style.left = `${info.x + 12}px`;
@@ -627,27 +665,25 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       selection.tier2Set = new Set(selection.treatments?.[1] || []);
       selection.tier3Set = new Set(selection.treatments?.[2] || []);
       selection.untreatableSet = new Set(selection.untreatable || []);
-      selection.hillslopeSdydByWepp = new Map(
-        (selection.hillslopesSdyd || []).map(h => [h.weppId, h.finalSdyd])
-      );
     }
 
     const treatmentTier1 = new Set(selection?.treatments?.[0] || []);
     const treatmentTier2 = new Set(selection?.treatments?.[1] || []);
     const treatmentTier3 = new Set(selection?.treatments?.[2] || []);
     const untreatable = new Set(selection?.untreatable || []);
-
-    function getCategoryColor(weppId) {
-      if (weppId == null) {
+    const sdydIncreaseSet = new Set(selection?.sdydIncreaseIds || []);
+    
+    function getCategoryColor(unitId) {
+      if (unitId == null) {
         return COLORS.untreated;
       }
-      if (treatmentTier3.has(weppId)) {
+      if (treatmentTier3.has(unitId)) {
         return COLORS.tier3;
       }
-      if (treatmentTier2.has(weppId)) {
+      if (treatmentTier2.has(unitId)) {
         return COLORS.tier2;
       }
-      if (treatmentTier1.has(weppId)) {
+      if (treatmentTier1.has(unitId)) {
         return COLORS.tier1;
       }
       return COLORS.untreated;
@@ -663,7 +699,7 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       lineWidthUnits: 'pixels',
       lineWidthMinPixels: 0.6,
       getLineColor: COLORS.outline,
-      getFillColor: feature => getCategoryColor(getFeatureWeppId(feature)),
+      getFillColor: feature => getCategoryColor(getFeatureIdentifier(feature, selectionIdField).id),
       updateTriggers: {
         getFillColor: selectionKey
       },
@@ -681,7 +717,22 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       lineWidthUnits: 'pixels',
       lineWidthMinPixels: 0,
       getLineColor: COLORS.untreatable,
-      getLineWidth: feature => (untreatable.has(getFeatureWeppId(feature)) ? 3 : 0),
+      getLineWidth: feature => (untreatable.has(getFeatureIdentifier(feature, selectionIdField).id) ? 3 : 0),
+      updateTriggers: {
+        getLineWidth: selectionKey
+      },
+      pickable: false
+    });
+
+    const sdydIncreaseLayer = new GeoJsonLayer({
+      id: 'hillslopes-sdyd-increase',
+      data: hillslopes,
+      filled: false,
+      stroked: true,
+      lineWidthUnits: 'pixels',
+      lineWidthMinPixels: 0,
+      getLineColor: COLORS.sdydIncrease,
+      getLineWidth: feature => (sdydIncreaseSet.has(getFeatureIdentifier(feature, selectionIdField).id) ? 3 : 0),
       updateTriggers: {
         getLineWidth: selectionKey
       },
@@ -705,7 +756,7 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       );
     }
 
-    layers.push(baseLayer, untreatableLayer);
+    layers.push(baseLayer, sdydIncreaseLayer, untreatableLayer);
 
     return layers;
   }
@@ -714,7 +765,24 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
     const sdyd = sdydSlider.value;
     const sddc = sddcSlider.value;
     const key = `${sdyd}_${sddc}`;
-    const selection = selectionByKey.get(key);
+    let selection = selectionByKey.get(key);
+
+    // Defensive fallback: if exact key is missing, use nearest available combination.
+    if (!selection) {
+      const sdydNum = Number(sdyd);
+      const sddcNum = Number(sddc);
+      let best = null;
+      let bestDistance = Infinity;
+      for (const candidate of selectionByKey.values()) {
+        const distance = Math.abs(candidate.sdyd - sdydNum) + Math.abs(candidate.sddc - sddcNum);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = candidate;
+        }
+      }
+      selection = best;
+    }
+
     currentSelection = selection;
     deckInstance.setProps({layers: buildLayers(selection)});
     renderLegend(legend, selection);
