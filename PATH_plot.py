@@ -7,8 +7,8 @@ import pandas as pd
 
 from PATH_CE import ce_select_sites_flexible
 
-
-def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity, fixed_cost, step_size=5, tolerance=1e-6):
+def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity,
+                                    fixed_cost, step_size=5, tolerance=1e-6):
     """
     Find SDDC/SDYD ranges and the minimum feasible SDDC threshold.
 
@@ -21,6 +21,11 @@ def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity, 
     - sddc_threshold: lower_bound_sddc (minimum feasible SDDC)
     - sdyd_threshold: max_sdyd_val (maximum SDYD)
     """
+    import pandas as pd
+    import os
+    from contextlib import redirect_stdout, redirect_stderr
+
+    # Determine Sdyd min/max from data based on post-treat columns for provided treatments.
     sdyd_treatments = []
     for i in range(len(treatments)):
         sdyd_treatment = "Sdyd post-treat " + treatments[i]
@@ -30,9 +35,11 @@ def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity, 
     try:
         min_sdyd_val = data[sdyd_treatments].min().min()
     except Exception:
+        # Fallback if post-treat columns differ; use post-fire min.
         min_sdyd_val = data["Sdyd post-fire"].min()
     min_sdyd_round = int(min_sdyd_val)
 
+    # Use post-fire SDDC maximum to set the upper bound of the search interval.
     max_sddc_val = data["Sddc post-fire"].max()
     max_sddc_round = int(max_sddc_val) + 1
 
@@ -57,11 +64,14 @@ def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity, 
         except Exception:
             return None
 
+    # We search for the minimum feasible SDDC threshold (status == 1).
+    # Assumption: feasibility is monotonic with SDDC threshold.
     low, high = 0, max_sddc_round
     best_feasible = None
 
     high_status = _status_for_threshold(high)
     if high_status != 1:
+        # If even the upper bound is not feasible, return the conservative bound.
         lower_bound_sddc = max_sddc_round
     else:
         low_status = _status_for_threshold(low)
@@ -83,6 +93,114 @@ def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity, 
     sddc_threshold_range = (int(lower_bound_sddc), int(max_sddc_round))
     sdyd_threshold_range = (int(min_sdyd_round), int(max_sdyd_val))
     return sddc_threshold_range, sdyd_threshold_range, int(lower_bound_sddc), int(max_sdyd_val)
+
+
+# def find_threshold_ranges(data, treatments, treatment_cost, treatment_quantity, fixed_cost, step_size=5, tolerance=1e-6):
+#     """
+#     Find conservative SDDC/SDYD ranges where the PRIMARY CE model is feasible
+#     (model_primary_status == 1) under monotonic threshold assumptions.
+
+#     Monotonic behavior used here:
+#     - Larger `sddc_threshold` is easier (requires less SDDC reduction).
+#     - Larger `sdyd_threshold` is easier (requires less SDYD reduction).
+
+#     We therefore compute a lower SDDC feasibility bound at a permissive SDYD,
+#     then compute a lower SDYD feasibility bound at that SDDC bound.
+
+#     Returns:
+#     - sddc_threshold_range: (lower_bound_sddc, max_sddc_threshold)
+#     - sdyd_threshold_range: (min_sdyd_threshold, max_sdyd_threshold)
+#     - sddc_threshold: lower_bound_sddc (minimum feasible SDDC)
+#     - sdyd_threshold: max_sdyd_val (maximum SDYD)
+#     """
+#     sdyd_treatments = []
+#     for i in range(len(treatments)):
+#         sdyd_treatment = "Sdyd post-treat " + treatments[i]
+#         sdyd_treatments.append(sdyd_treatment)
+
+#     max_sdyd_val = int(np.ceil(pd.to_numeric(data["Sdyd post-fire"], errors="coerce").max())) + 1
+#     try:
+#         min_sdyd_val = data[sdyd_treatments].min().min()
+#     except Exception:
+#         min_sdyd_val = data["Sdyd post-fire"].min()
+#     min_sdyd_round = int(min_sdyd_val)
+
+#     max_sddc_val = pd.to_numeric(data["Sddc post-fire"], errors="coerce").max()
+#     max_sddc_round = int(np.ceil(max_sddc_val)) + 1
+
+#     def _status_for_threshold(sddc_thr, sdyd_thr):
+#         try:
+#             with open(os.devnull, "w") as devnull:
+#                 with redirect_stdout(devnull), redirect_stderr(devnull):
+#                     result = ce_select_sites_flexible(
+#                         data=data,
+#                         treatments=treatments,
+#                         treatment_cost=treatment_cost,
+#                         treatment_quantity=treatment_quantity,
+#                         fixed_cost=fixed_cost,
+#                         sdyd_threshold=int(sdyd_thr),
+#                         sddc_threshold=int(sddc_thr),
+#                         slope_range=None,
+#                         bs_threshold=None,
+#                     )
+#             if result is None:
+#                 return None
+#             return result[0]
+#         except Exception:
+#             return None
+
+#     sdyd_anchor = int(min_sdyd_round)
+
+#     low, high = 0, max_sddc_round
+#     best_feasible = None
+
+#     high_status = _status_for_threshold(high, sdyd_anchor)
+#     if high_status != 1:
+#         lower_bound_sddc = max_sddc_round
+#     else:
+#         low_status = _status_for_threshold(low, sdyd_anchor)
+#         if low_status == 1:
+#             lower_bound_sddc = 0
+#         else:
+#             while low <= high:
+#                 mid = (low + high) // 2
+#                 status = _status_for_threshold(mid, sdyd_anchor)
+
+#                 if status == 1:
+#                     best_feasible = mid
+#                     high = mid - 1
+#                 else:
+#                     low = mid + 1
+
+#             lower_bound_sddc = best_feasible if best_feasible is not None else max_sddc_round
+
+#     # Now find minimum feasible SDYD at the computed SDDC lower bound.
+#     # Since larger SDYD is easier, this threshold is monotonic and can be
+#     # located with binary search.
+#     low_sdyd, high_sdyd = int(min_sdyd_round), int(max_sdyd_val)
+#     best_sdyd = None
+
+#     high_sdyd_status = _status_for_threshold(lower_bound_sddc, high_sdyd)
+#     if high_sdyd_status == 1:
+#         while low_sdyd <= high_sdyd:
+#             mid_sdyd = (low_sdyd + high_sdyd) // 2
+#             status = _status_for_threshold(lower_bound_sddc, mid_sdyd)
+#             if status == 1:
+#                 best_sdyd = mid_sdyd
+#                 high_sdyd = mid_sdyd - 1
+#             else:
+#                 low_sdyd = mid_sdyd + 1
+
+#     if best_sdyd is None:
+#         min_opt_sdyd = int(max_sdyd_val)
+#         max_opt_sdyd = int(max_sdyd_val)
+#     else:
+#         min_opt_sdyd = int(best_sdyd)
+#         max_opt_sdyd = int(max_sdyd_val)
+
+#     sddc_threshold_range = (int(lower_bound_sddc), int(max_sddc_round))
+#     sdyd_threshold_range = (int(min_opt_sdyd), int(max_opt_sdyd))
+#     return sddc_threshold_range, sdyd_threshold_range, int(lower_bound_sddc), int(max_sdyd_val)
 
 
 def all_thresholds(
