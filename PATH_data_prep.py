@@ -455,6 +455,35 @@ def build_aggregates(
     hills["Runoff (m^3)"] = pd.to_numeric(hills["Runoff (m^3)"], errors="coerce")
     hills["_ntu_weighted_numer"] = hills["NTU (g/L)"] * hills["Runoff (m^3)"]
 
+    # FIX: Handle undisturbed scenario when using contrast_files
+    # When use_contrast_files is True, undisturbed rows don't get contrast_ids assigned because
+    # they're not part of the contrast groupings. This causes them to be dropped below.
+    # Assign undisturbed rows the same contrast_ids as their sbs_map counterparts.
+    if use_contrast_files and "scenario" in hills.columns:
+        undisturbed_mask = hills["scenario"] == "undisturbed"
+        if undisturbed_mask.any():
+            print(f"DEBUG: Found {undisturbed_mask.sum()} undisturbed rows")
+            # Build a mapping from Topaz ID to contrast_id using sbs_map rows
+            sbs_rows = hills[hills["scenario"] == "sbs_map"].copy()
+            sbs_rows["Topaz ID"] = pd.to_numeric(sbs_rows["Topaz ID"], errors="coerce").astype("Int64")
+            sbs_rows["contrast_id"] = pd.to_numeric(sbs_rows["contrast_id"], errors="coerce").astype("Int64")
+            
+            # Create topaz_id to contrast_id mapping from sbs_map
+            topaz_to_contrast_map = (
+                sbs_rows[["Topaz ID", "contrast_id"]]
+                .dropna(subset=["Topaz ID", "contrast_id"])
+                .drop_duplicates(subset=["Topaz ID"])
+                .set_index("Topaz ID")["contrast_id"]
+                .to_dict()
+            )
+            
+            print(f"DEBUG: Created mapping with {len(topaz_to_contrast_map)} Topaz IDs")
+            # Apply mapping to undisturbed rows
+            undisturbed_topaz = pd.to_numeric(hills.loc[undisturbed_mask, "Topaz ID"], errors="coerce").astype("Int64")
+            mapped_contrast_ids = undisturbed_topaz.map(topaz_to_contrast_map)
+            print(f"DEBUG: Mapped {mapped_contrast_ids.notna().sum()} undisturbed rows to contrast_ids")
+            hills.loc[undisturbed_mask, "contrast_id"] = mapped_contrast_ids
+
     hills_agg = hills.dropna(subset=["contrast_id"]).groupby(["contrast_id", "scenario"], as_index=False).agg(agg_dict)
     hills_agg["Sediment Yield (t/ac)"] = hills_agg["Sediment Yield (t)"] / hills_agg["Landuse Area (ac)"]
     hills_agg["NTU (g/L)"] = np.where(
@@ -1233,6 +1262,11 @@ def build_aggregates(
 
     sbs_mask = hills["scenario"].eq("sbs_map")
     hills.loc[sbs_mask, "contrast_id"] = hills.loc[sbs_mask, "Topaz ID"].map(topaz_to_group).astype("Int64")
+
+    # Also handle undisturbed scenario - assign it the same contrast_ids as sbs_map based on Topaz IDs
+    und_mask = hills["scenario"].eq("undisturbed")
+    if und_mask.any():
+        hills.loc[und_mask, "contrast_id"] = hills.loc[und_mask, "Topaz ID"].map(topaz_to_group).astype("Int64")
 
     return _build_aggregates_core(
         hillslopes=hills,
