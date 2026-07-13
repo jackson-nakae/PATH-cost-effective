@@ -128,10 +128,7 @@ def ce_select_sites_flexible(
             )
 
             for i in range(num_sites):
-                # The fallback model should preserve the primary model's ability
-                # to leave a site untreated. Requiring exactly one treatment here
-                # contradicts the per-site Sdyd constraints for hillslopes where
-                # every treatment worsens erosion.
+                # The fallback model should preserve the primary model's ability to leave a site untreated. 
                 model_secondary += sum(x_2[t][i] for t in treatments) <= 1
 
             for t in treatments:
