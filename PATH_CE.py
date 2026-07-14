@@ -234,7 +234,7 @@ def ce_select_sites_flexible(
         print("Solver failed!")
         return None
 
-    result_tuple = (
+    results = (
         model_primary_status,
         treatment_cost_vectors,
         sediment_yield_reduction_thresholds,
@@ -249,5 +249,5 @@ def ce_select_sites_flexible(
         total_fixed_cost,
     )
     if return_increase_class:
-        return result_tuple + (untreatable_sdyd_increase,)
-    return result_tuple
+        return results + (untreatable_sdyd_increase,)
+    return results
