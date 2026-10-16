@@ -857,8 +857,10 @@ def _annotate_interactive_hillslopes(geojson_data, source_df, selection_id_col, 
     if topaz_id is not None and topaz_id in topaz_to_selection:
       resolved_selection_id = topaz_to_selection[topaz_id]
 
-    # Fallback: preserve an existing selection id only if it belongs to the current model domain.
-    elif existing_selection_id is not None and (not valid_selection_ids or existing_selection_id in valid_selection_ids):
+    # Fallback only when no TopazID mapping exists at all: GeoJSON WeppID numbering can differ from the
+    # model's ids, so unmapped features would otherwise be mislabeled as modeled hillslopes (section 2.1
+    # joins on TopazID only, and this keeps 3.1 consistent with it).
+    elif not topaz_to_selection and existing_selection_id is not None and (not valid_selection_ids or existing_selection_id in valid_selection_ids):
       resolved_selection_id = existing_selection_id
 
     if resolved_selection_id is not None:
@@ -1347,11 +1349,6 @@ legend_html = '''
     <span style="display: inline-block; width: 12px; height: 12px; 
                  background-color: transparent; border: 2px solid red; margin-right: 6px;"></span>
     <span style="font-size:8px;">Hillslope Sdyd Threshold not met</span>
-</div>
-<div style="margin-bottom: 4px;">
-    <span style="display: inline-block; width: 12px; height: 12px; 
-                 background-color: transparent; border: 2px solid yellow; margin-right: 6px;"></span>
-    <span style="font-size:8px;">Hillslope Sdyd Increase Post-Treat</span>
 </div>
 </div>
 '''

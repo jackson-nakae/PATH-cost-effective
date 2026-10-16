@@ -95,7 +95,9 @@ async function resolveDeckApi() {
       Deck: globalDeck.Deck,
       GeoJsonLayer: globalDeck.GeoJsonLayer,
       MapView: globalDeck.MapView,
-      WebMercatorViewport: globalDeck.WebMercatorViewport
+      WebMercatorViewport: globalDeck.WebMercatorViewport,
+      TileLayer: globalDeck.TileLayer,
+      BitmapLayer: globalDeck.BitmapLayer
     };
     return deckApiCache;
   }
@@ -506,7 +508,6 @@ function renderLegend(container, selection) {
     {label: '0.5 tons/acre', color: COLORS.tier1},
     {label: '1 tons/acre', color: COLORS.tier2},
     {label: '2 tons/acre', color: COLORS.tier3},
-    {label: 'Sdyd increases after treatment', color: COLORS.sdydIncrease, outlineOnly: true},
     {label: 'Hillslope Sdyd threshold not met', color: COLORS.untreatable, outlineOnly: true}
   ];
 
@@ -541,7 +542,7 @@ function renderLegend(container, selection) {
 }
 
 window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(options) {
-  const {Deck, GeoJsonLayer, MapView, WebMercatorViewport} = await resolveDeckApi();
+  const {Deck, GeoJsonLayer, MapView, WebMercatorViewport, TileLayer, BitmapLayer} = await resolveDeckApi();
 
   const {
     containerId,
@@ -615,6 +616,32 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
     controller: true,
     layers: []
   });
+
+  // Light basemap (Esri World Light Gray, no API key) so hillslopes stand out; the CSS background is the offline fallback.
+  const basemapLayer = (TileLayer && BitmapLayer)
+    ? new TileLayer({
+        id: 'basemap',
+        data: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+        minZoom: 0,
+        maxZoom: 16,
+        tileSize: 256,
+        renderSubLayers: props => {
+          const {west, south, east, north} = props.tile.bbox;
+          return new BitmapLayer(props, {
+            data: null,
+            image: props.data,
+            bounds: [west, south, east, north]
+          });
+        }
+      })
+    : null;
+
+  if (basemapLayer) {
+    const attribution = document.createElement('div');
+    attribution.className = 'hillmap-attribution';
+    attribution.innerHTML = 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors';
+    mapEl.appendChild(attribution);
+  }
 
   let currentSelection = null;
 
@@ -717,7 +744,7 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       lineWidthUnits: 'pixels',
       lineWidthMinPixels: 0,
       getLineColor: COLORS.untreatable,
-      getLineWidth: feature => (untreatable.has(getFeatureIdentifier(feature, selectionIdField).id) ? 3 : 0),
+      getLineWidth: feature => (untreatable.has(getFeatureIdentifier(feature, selectionIdField).id) ? 1.5 : 0),
       updateTriggers: {
         getLineWidth: selectionKey
       },
@@ -739,7 +766,7 @@ window.initInteractiveHillslopeMap = async function initInteractiveHillslopeMap(
       pickable: false
     });
 
-    const layers = [];
+    const layers = basemapLayer ? [basemapLayer] : [];
 
     if (channels) {
       layers.push(
