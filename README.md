@@ -18,7 +18,7 @@ The module is intended to expose the same inputs used by the report and optimize
 - A PDF report with the same scenario results
 - Generated CSV / PKL threshold sweep outputs for reuse on later renders
 
-## Current workflow
+## Current workflow (as of 10/19/26)
 
 The reports are built from the same parameter set and should be rendered together.
 
