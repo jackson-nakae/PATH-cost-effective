@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: "General question (non-technical)"
+    url: "https://github.com/jackson-nakae/PATH-cost-effective/discussions"
+    about: "Use Discussions for open-ended questions or early ideas."
